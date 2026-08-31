@@ -29,22 +29,31 @@ router.get("/", async (req, res) => {
   }
 });
 
+function mainSupplierName(prod) {
+  const list = Array.isArray(prod?.suppliers) ? prod.suppliers : [];
+  const main = list.find((s) => s && s.isMain) || list[0];
+  return (main && main.name) || "";
+}
+
 router.post("/", async (req, res) => {
   try {
-    const { date, notes, items } = req.body;
+    const { date, notes, items, supplier } = req.body;
     const requested = Array.isArray(items) ? items : [];
     const lines = requested
       .map((it) => ({
         purchaseId: pid(it.purchaseId || it.purchase),
+        productId: pid(it.productId || it.product),
         qty: Number(it.qty) || 0,
       }))
-      .filter((it) => it.purchaseId && it.qty > 0);
+      .filter((it) => it.qty > 0 && (it.purchaseId || it.productId));
     if (!lines.length) {
       return res.status(400).json({ success: false, message: "Return quantity is required" });
     }
 
-    const purchaseIds = [...new Set(lines.map((l) => l.purchaseId))];
-    const purchases = await Purchase.find({ _id: { $in: purchaseIds }, adminId: req.adminId });
+    const purchaseIds = [...new Set(lines.map((l) => l.purchaseId).filter(Boolean))];
+    const purchases = purchaseIds.length
+      ? await Purchase.find({ _id: { $in: purchaseIds }, adminId: req.adminId })
+      : [];
     if (purchases.length !== purchaseIds.length) {
       return res.status(404).json({ success: false, message: "Purchase not found" });
     }
@@ -62,48 +71,77 @@ router.post("/", async (req, res) => {
     });
 
     const savedItems = [];
+    let invoiceLabel = "";
+    let supplierName = (supplier || "").trim();
+
     for (const line of lines) {
-      const purchase = purchaseById[line.purchaseId];
-      const bought = purchaseQty(purchase);
-      const remain = bought - (already[line.purchaseId] || 0);
-      if (line.qty > remain + 1e-9) {
-        return res.status(400).json({
-          success: false,
-          message: `Return qty ${line.qty} is more than remaining ${remain}`,
+      if (line.purchaseId) {
+        const purchase = purchaseById[line.purchaseId];
+        const bought = purchaseQty(purchase);
+        const remain = bought - (already[line.purchaseId] || 0);
+        if (line.qty > remain + 1e-9) {
+          return res.status(400).json({
+            success: false,
+            message: `Return qty ${line.qty} is more than remaining ${remain}`,
+          });
+        }
+        const productId = pid(purchase.product);
+        if (!productId) {
+          return res.status(400).json({ success: false, message: "Purchase has no product" });
+        }
+        const prod = await Product.findOne({ _id: productId, adminId: req.adminId });
+        const available = Number(prod?.stock) || 0;
+        if (line.qty > available + 1e-9) {
+          return res.status(400).json({
+            success: false,
+            message: `"${prod?.name || purchase.productName}" stock is only ${available} — cannot return ${line.qty} to supplier`,
+            stockError: true,
+          });
+        }
+        const rate = bought > 0 ? (Number(purchase.total) || 0) / bought : Number(purchase.rate) || 0;
+        if (!invoiceLabel) invoiceLabel = purchase.invoice || purchase.invoiceNum || "";
+        if (!supplierName) supplierName = purchase.supplier || purchase.supplierName || "";
+        savedItems.push({
+          purchase: purchase._id,
+          product: productId,
+          productName: purchase.productName || prod?.name || "Item",
+          category: purchase.category || prod?.category || "",
+          qty: line.qty,
+          rate,
+          amount: +(rate * line.qty).toFixed(2),
+        });
+      } else {
+        const prod = await Product.findOne({ _id: line.productId, adminId: req.adminId });
+        if (!prod) return res.status(404).json({ success: false, message: "Product not found" });
+        const available = Number(prod.stock) || 0;
+        if (line.qty > available + 1e-9) {
+          return res.status(400).json({
+            success: false,
+            message: `"${prod.name}" stock is only ${available} — cannot return ${line.qty} to supplier`,
+            stockError: true,
+          });
+        }
+        const rate = Number(prod.purchasePrice) || Number(prod.price) || 0;
+        if (!supplierName) supplierName = mainSupplierName(prod);
+        if (!invoiceLabel) invoiceLabel = "STOCK";
+        savedItems.push({
+          purchase: null,
+          product: prod._id,
+          productName: prod.name || "Item",
+          category: prod.category || "",
+          qty: line.qty,
+          rate,
+          amount: +(rate * line.qty).toFixed(2),
         });
       }
-      const productId = pid(purchase.product);
-      if (!productId) {
-        return res.status(400).json({ success: false, message: "Purchase has no product" });
-      }
-      const prod = await Product.findOne({ _id: productId, adminId: req.adminId });
-      const available = Number(prod?.stock) || 0;
-      if (line.qty > available + 1e-9) {
-        return res.status(400).json({
-          success: false,
-          message: `"${prod?.name || purchase.productName}" stock is only ${available} — cannot return ${line.qty} to supplier`,
-          stockError: true,
-        });
-      }
-      const rate = bought > 0 ? (Number(purchase.total) || 0) / bought : Number(purchase.rate) || 0;
-      savedItems.push({
-        purchase: purchase._id,
-        product: productId,
-        productName: purchase.productName || prod?.name || "Item",
-        category: purchase.category || prod?.category || "",
-        qty: line.qty,
-        rate,
-        amount: +(rate * line.qty).toFixed(2),
-      });
     }
 
-    const first = purchaseById[lines[0].purchaseId];
     const count = await PurchaseReturn.countDocuments({ adminId: req.adminId });
     const doc = await PurchaseReturn.create({
       adminId: req.adminId,
-      invoice: first.invoice || first.invoiceNum || "",
+      invoice: invoiceLabel,
       returnInvoice: `PR-${String(count + 1).padStart(4, "0")}`,
-      supplier: first.supplier || first.supplierName || "",
+      supplier: supplierName,
       date: date || new Date().toISOString().slice(0, 10),
       items: savedItems,
       total: savedItems.reduce((s, it) => s + (Number(it.amount) || 0), 0),
