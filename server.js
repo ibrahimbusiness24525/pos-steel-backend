@@ -96,7 +96,9 @@ app.use("/api/accounts",   require("./routes/accounts"));
 app.use("/api/superadmin", require("./routes/superadmin"));
 app.use("/api/translate",  require("./routes/translate"));
 app.use("/api/loaders",    require("./routes/loaders"));
-app.use("/api/parties",    require("./routes/parties"));
+app.use("/api/parties",           require("./routes/parties"));
+app.use("/api/sale-returns",      require("./routes/saleReturns"));
+app.use("/api/purchase-returns",  require("./routes/purchaseReturns"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "SteelPOS Backend Running ✅", port: process.env.PORT || 5000 }));

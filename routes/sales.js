@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Sale = require("../models/Sale");
+const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
 
@@ -189,27 +190,38 @@ router.put("/:id", protect, async (req, res) => {
 
 router.delete("/:id", protect, async (req, res) => {
   try {
-    const sale = await Sale.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
+    const sale = await Sale.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!sale) return res.status(404).json({ success: false, message: "Sale not found" });
 
-    // Stock wapas karo jab sale delete ho — multi-product sale ho to sab
-    // products ka stock wapas karo, sirf pehle wale ka nahi.
+    const returns = await SaleReturn.find({ adminId: req.adminId, sale: sale._id });
+    const returned = {};
+    returns.forEach((r) => {
+      (r.items || []).forEach((it) => {
+        const id = String(it.product || "");
+        returned[id] = (returned[id] || 0) + (Number(it.qty) || 0);
+      });
+    });
+
+    const restore = async (productId, qty) => {
+      const id = productId && (productId._id || productId);
+      const net = (Number(qty) || 0) - (returned[String(id)] || 0);
+      if (!id || net <= 0) return;
+      await Product.findOneAndUpdate(
+        { _id: id, adminId: req.adminId },
+        { $inc: { stock: net } }
+      );
+    };
+
     if (Array.isArray(sale.saleItems) && sale.saleItems.length > 0) {
       for (const si of sale.saleItems) {
-        const pid = si.productId || si.product;
-        if (pid && si.qty) {
-          await Product.findOneAndUpdate(
-            { _id: pid, adminId: req.adminId },
-            { $inc: { stock: Number(si.qty) } }
-          );
-        }
+        await restore(si.productId || si.product, si.qty);
       }
     } else if (sale.product && sale.qty) {
-      await Product.findOneAndUpdate(
-        { _id: sale.product, adminId: req.adminId },
-        { $inc: { stock: Number(sale.qty) } }
-      );
+      await restore(sale.product, sale.qty);
     }
+
+    await SaleReturn.deleteMany({ adminId: req.adminId, sale: sale._id });
+    await Sale.deleteOne({ _id: sale._id });
 
     res.json({ success: true, message: "Sale deleted" });
   } catch (err) {

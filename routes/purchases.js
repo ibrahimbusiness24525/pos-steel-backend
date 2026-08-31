@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Purchase = require("../models/Purchase");
+const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
 
@@ -140,26 +141,49 @@ router.put("/:id", protect, async (req, res) => {
 
 router.delete("/:id", protect, async (req, res) => {
   try {
-    const purchase = await Purchase.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
+    const purchase = await Purchase.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
-    // Reverse stock
-    if (Array.isArray(purchase.entries)) {
+    const allReturns = await PurchaseReturn.find({ adminId: req.adminId });
+    const returns = allReturns.filter((r) =>
+      (r.items || []).some((it) => String(it.purchase) === String(purchase._id))
+    );
+    let returnedQty = 0;
+    returns.forEach((r) => {
+      (r.items || []).forEach((it) => {
+        if (String(it.purchase) === String(purchase._id)) returnedQty += Number(it.qty) || 0;
+      });
+    });
+
+    const reverse = async (productId, qty) => {
+      const net = (Number(qty) || 0) - returnedQty;
+      if (!productId || net <= 0) return;
+      await Product.findOneAndUpdate(
+        { _id: productId, adminId: req.adminId },
+        { $inc: { stock: -net } }
+      );
+    };
+
+    if (Array.isArray(purchase.entries) && purchase.entries.length) {
       for (const entry of purchase.entries) {
-        if (entry.product && entry.quantity) {
-          await Product.findOneAndUpdate(
-            { _id: entry.product, adminId: req.adminId },
-            { $inc: { stock: -Number(entry.quantity) } }
-          );
-        }
+        if (entry.product && entry.quantity) await reverse(entry.product, entry.quantity);
       }
     } else if (purchase.product && purchase.qty) {
-      await Product.findOneAndUpdate(
-        { _id: purchase.product, adminId: req.adminId },
-        { $inc: { stock: -Number(purchase.qty) } }
-      );
+      await reverse(purchase.product, purchase.qty);
     }
 
+    for (const r of returns) {
+      const leftover = (r.items || []).filter((it) => String(it.purchase) !== String(purchase._id));
+      if (!leftover.length) await PurchaseReturn.deleteOne({ _id: r._id });
+      else {
+        await PurchaseReturn.findByIdAndUpdate(r._id, {
+          items: leftover,
+          total: leftover.reduce((s, it) => s + (Number(it.amount) || 0), 0),
+        });
+      }
+    }
+
+    await Purchase.deleteOne({ _id: purchase._id });
     res.json({ success: true, message: "Purchase deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
