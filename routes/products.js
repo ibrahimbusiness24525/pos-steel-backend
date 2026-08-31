@@ -1,12 +1,46 @@
 const express = require("express");
 const router = express.Router();
 const Product = require("../models/Product");
+const Purchase = require("../models/Purchase");
 const { protect } = require("../middleware/auth");
 
 const normalizeProduct = (body) => {
   const d = { ...body };
   return d;
 };
+
+function mainSupplierName(data) {
+  const list = Array.isArray(data?.suppliers) ? data.suppliers : [];
+  const main = list.find((s) => s && s.isMain) || list[0];
+  return (main && main.name) || "";
+}
+
+async function createOpeningPurchase(req, product, qty) {
+  const amount = Number(qty) || 0;
+  if (!product || amount <= 0) return null;
+  const count = await Purchase.countDocuments({ adminId: req.adminId });
+  const invoice = `PO-${String(count + 1).padStart(4, "0")}`;
+  const rate = Number(product.purchasePrice) || Number(product.price) || 0;
+  const supplier = mainSupplierName(product) || "Opening Stock";
+  return Purchase.create({
+    adminId: req.adminId,
+    createdBy: req.user._id,
+    invoice,
+    invoiceNum: invoice,
+    date: new Date().toISOString().slice(0, 10),
+    supplier,
+    product: product._id,
+    productName: product.name || "",
+    category: product.category || "",
+    qty: amount,
+    rate,
+    total: +(rate * amount).toFixed(2),
+    productPrice: rate,
+    rows: [{ qty: amount, purchasePrice: rate, salePrice: Number(product.price) || 0 }],
+    notes: "Product create",
+    skipStock: true,
+  });
+}
 
 // GET all products — only this admin's products
 router.get("/", protect, async (req, res) => {
@@ -24,6 +58,9 @@ router.post("/", protect, async (req, res) => {
   try {
     const data = { ...normalizeProduct(req.body), adminId: req.adminId };
     const product = await Product.create(data);
+    if ((Number(product.stock) || 0) > 0) {
+      await createOpeningPurchase(req, product, product.stock);
+    }
     res.status(201).json({ success: true, product });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });

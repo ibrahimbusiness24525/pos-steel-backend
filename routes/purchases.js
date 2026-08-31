@@ -68,6 +68,8 @@ const addStock = async (adminId, productId, qty, category, productPrice, rows) =
 router.post("/", protect, async (req, res) => {
   try {
     const data = { ...req.body, createdBy: req.user._id, adminId: req.adminId };
+    const skipStock = !!data.skipStock;
+    delete data.skipStock;
     if (!data.invoiceNum && !data.invoice) {
       const count = await Purchase.countDocuments({ adminId: req.adminId });
       data.invoiceNum = `PO-${String(count + 1).padStart(4, "0")}`;
@@ -76,14 +78,16 @@ router.post("/", protect, async (req, res) => {
 
     const purchase = await Purchase.create(data);
 
-    if (Array.isArray(data.entries)) {
-      for (const entry of data.entries) {
-        if (entry.product && entry.quantity) {
-          await addStock(req.adminId, entry.product, entry.quantity, entry.category, entry.productPrice, entry.rows);
+    if (!skipStock) {
+      if (Array.isArray(data.entries)) {
+        for (const entry of data.entries) {
+          if (entry.product && entry.quantity) {
+            await addStock(req.adminId, entry.product, entry.quantity, entry.category, entry.productPrice, entry.rows);
+          }
         }
+      } else if (data.product && data.qty) {
+        await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows);
       }
-    } else if (data.product && data.qty) {
-      await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows);
     }
 
     res.status(201).json({ success: true, purchase });
