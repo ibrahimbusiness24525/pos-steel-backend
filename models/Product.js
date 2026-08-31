@@ -20,7 +20,7 @@ const productSchema = new mongoose.Schema(
     chaderType: { type: String, default: "" },
     unit: {
       type: String,
-      enum: ["feet", "meter", "piece", "kg", "set", "bundle", "ton"],
+      enum: ["feet", "meter", "piece", "kg", "set", "bundle", "ton", "box", "dozen", "pair", "packet"],
       default: "piece",
     },
     price: { type: Number, required: true, default: 0 },
@@ -28,6 +28,19 @@ const productSchema = new mongoose.Schema(
     purchasePercentage: { type: Number, default: 0 },
     stock: { type: Number, required: true, default: 0 },
     lowStockThreshold: { type: Number, default: 10 },
+    barcode: { type: String, default: "" },
+    brand: { type: String, default: "" },
+    subCategory: { type: String, default: "" },
+    group: { type: String, default: "" },
+    location: { type: String, default: "" },
+    notes: { type: String, default: "" },
+    photo: { type: String, default: "" },
+    suppliers: { type: [{ name: String, id: String, isMain: Boolean }], default: [] },
+    secondaryUnit: { type: String, default: "" },
+    tax: { type: String, default: "" },
+    taxInclusive: { type: Boolean, default: true },
+    isComposite: { type: Boolean, default: false },
+    variations: { type: [String], default: [] },
   },
   { timestamps: true, strict: false }
 );

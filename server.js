@@ -84,7 +84,7 @@ app.use(cors({
 // OPTIONS preflight — sab routes ke liye
 app.options("*", cors());
 
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use("/api/auth",       require("./routes/auth"));
@@ -96,6 +96,7 @@ app.use("/api/accounts",   require("./routes/accounts"));
 app.use("/api/superadmin", require("./routes/superadmin"));
 app.use("/api/translate",  require("./routes/translate"));
 app.use("/api/loaders",    require("./routes/loaders"));
+app.use("/api/parties",    require("./routes/parties"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "SteelPOS Backend Running ✅", port: process.env.PORT || 5000 }));
