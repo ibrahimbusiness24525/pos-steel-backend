@@ -9,6 +9,8 @@ const ledgerEntrySchema = new mongoose.Schema(
     date: { type: String, default: "" },
     note: { type: String, default: "" },
     invoice: { type: String, default: "" },
+    accountId: { type: String, default: "" },
+    accountName: { type: String, default: "" },
   },
   { timestamps: true }
 );

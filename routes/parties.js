@@ -164,7 +164,7 @@ router.get("/:id", async (req, res) => {
   try {
     const party = await Party.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!party) return res.status(404).json({ success: false, message: "Not found" });
-    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ date: -1, createdAt: -1 });
+    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ createdAt: -1, _id: -1 });
     res.json({ success: true, party: withTotals(party, entries), entries });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -215,7 +215,7 @@ router.post("/:id/entries", async (req, res) => {
   try {
     const party = await Party.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!party) return res.status(404).json({ success: false, message: "Not found" });
-    const { kind, amount, date, note, invoice } = req.body;
+    const { kind, amount, date, note, invoice, accountId, accountName } = req.body;
     if (!["take", "give", "credit", "cash_in", "cash_out"].includes(kind)) {
       return res.status(400).json({ success: false, message: "kind must be take or give" });
     }
@@ -231,8 +231,10 @@ router.post("/:id/entries", async (req, res) => {
       date: date || new Date().toISOString().slice(0, 10),
       note: note || "",
       invoice: invoice || "",
+      accountId: accountId || "",
+      accountName: accountName || "",
     });
-    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ date: -1, createdAt: -1 });
+    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ createdAt: -1, _id: -1 });
     res.status(201).json({ success: true, entry, party: withTotals(party, entries), entries });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -250,7 +252,7 @@ router.delete("/:id/entries/:entryId", async (req, res) => {
       adminId: req.adminId,
     });
     if (!entry) return res.status(404).json({ success: false, message: "Entry not found" });
-    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ date: -1, createdAt: -1 });
+    const entries = await LedgerEntry.find({ adminId: req.adminId, party: party._id }).sort({ createdAt: -1, _id: -1 });
     res.json({ success: true, party: withTotals(party, entries), entries });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

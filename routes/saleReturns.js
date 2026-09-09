@@ -15,15 +15,24 @@ function pid(v) {
 
 function saleSoldMap(sale) {
   const map = {};
+  const add = (id, qty) => {
+    const key = pid(id);
+    const n = Number(qty) || 0;
+    if (!key || n <= 0) return;
+    map[key] = (map[key] || 0) + n;
+  };
   if (Array.isArray(sale.saleItems) && sale.saleItems.length > 0) {
-    sale.saleItems.forEach((si) => {
-      const id = pid(si.productId || si.product);
-      const qty = Number(si.qty) || 0;
-      if (id && qty) map[id] = (map[id] || 0) + qty;
+    sale.saleItems.forEach((si) => add(si.productId || si.product, si.qty));
+  }
+  if (Array.isArray(sale.items) && sale.items.length > 0) {
+    sale.items.forEach((it) => {
+      const row = (it.rows && it.rows[0]) || {};
+      const qty = Number(it.qty) || Number(row.qty) || Number(row.quantity) || Number(row.weight) || Number(row.feet) || 0;
+      add(it.productId || it.product, qty);
     });
-  } else if (sale.product && sale.qty) {
-    const id = pid(sale.product);
-    if (id) map[id] = (map[id] || 0) + (Number(sale.qty) || 0);
+  }
+  if (!Object.keys(map).length && sale.product && sale.qty) {
+    add(sale.product, sale.qty);
   }
   return map;
 }
@@ -64,7 +73,11 @@ router.post("/", async (req, res) => {
 
     const requested = Array.isArray(items) ? items : [];
     const lines = requested
-      .map((it) => ({ productId: pid(it.productId || it.product), qty: Number(it.qty) || 0 }))
+      .map((it) => ({
+        productId: pid(it.productId || it.product),
+        qty: Number(it.qty) || 0,
+        rate: it.rate != null && it.rate !== "" ? Number(it.rate) : null,
+      }))
       .filter((it) => it.productId && it.qty > 0);
     if (!lines.length) {
       return res.status(400).json({ success: false, message: "Return quantity is required" });
@@ -99,13 +112,14 @@ router.post("/", async (req, res) => {
         });
       }
       const meta = itemMeta(sale, line.productId, productsById);
+      const rate = line.rate != null && Number.isFinite(line.rate) ? line.rate : meta.rate;
       savedItems.push({
         product: line.productId,
         productName: meta.productName,
         category: meta.category,
         qty: line.qty,
-        rate: meta.rate,
-        amount: +(meta.rate * line.qty).toFixed(2),
+        rate,
+        amount: +(rate * line.qty).toFixed(2),
       });
     }
 
@@ -126,7 +140,8 @@ router.post("/", async (req, res) => {
     for (const it of savedItems) {
       await Product.findOneAndUpdate(
         { _id: it.product, adminId: req.adminId },
-        { $inc: { stock: Number(it.qty) } }
+        { $inc: { stock: Number(it.qty) } },
+        { runValidators: false }
       );
     }
 

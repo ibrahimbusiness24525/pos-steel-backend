@@ -26,7 +26,7 @@ router.get("/", protect, async (req, res) => {
 // e.g. Purchase screen computes 80 (price × (1 + %)), but Dashboard cost showed 84
 // because it was blended with an old, non-purchase 0%. Overwriting keeps the two in
 // sync, exactly like Chader/Net/Hardware/Custom already do for their purchase price.
-const addStock = async (adminId, productId, qty, category, productPrice, rows) => {
+const addStock = async (adminId, productId, qty, category, productPrice, rows, unit) => {
   const updateFields = { $inc: { stock: Number(qty) } };
 
   if (category !== "Pipe") {
@@ -45,7 +45,19 @@ const addStock = async (adminId, productId, qty, category, productPrice, rows) =
     }
 
     if (newPrice > 0) {
-      updateFields.$set = { price: newPrice, purchasePrice: newPrice };
+      // Hardware keeps `price` as sale price — only update cost.
+      if (String(category || "").toLowerCase() === "hardware") {
+        updateFields.$set = { purchasePrice: newPrice };
+      } else {
+        updateFields.$set = { price: newPrice, purchasePrice: newPrice };
+      }
+    }
+    
+    // Update unit for Hardware/Custom if provided
+    if ((category === "Hardware" || category === "Custom") && unit) {
+      updateFields.$set = updateFields.$set || {};
+      updateFields.$set.unit = unit;
+      updateFields.$set.stockUnit = unit;
     }
   } else if (rows && rows.length > 0) {
     const row = rows[0];
@@ -58,7 +70,7 @@ const addStock = async (adminId, productId, qty, category, productPrice, rows) =
   const updated = await Product.findOneAndUpdate(
     { _id: productId, adminId },
     updateFields,
-    { new: true }
+    { new: true, runValidators: false }
   );
   if (!updated) {
     console.warn(`[PURCHASE] Stock NOT added for product ${productId} — product not found under adminId ${adminId}.`);
@@ -75,18 +87,30 @@ router.post("/", protect, async (req, res) => {
       data.invoiceNum = `PO-${String(count + 1).padStart(4, "0")}`;
     }
     if (data.invoice && !data.invoiceNum) data.invoiceNum = data.invoice;
+    if (!data.invoice && data.invoiceNum) data.invoice = data.invoiceNum;
 
     const purchase = await Purchase.create(data);
+
+    if (purchase.product) {
+      await Product.findOneAndUpdate(
+        { _id: purchase.product, adminId: req.adminId },
+        {
+          lastInvoice: purchase.invoice || purchase.invoiceNum || "",
+          lastPurchaseDate: purchase.date || "",
+          lastSupplier: purchase.supplier || purchase.supplierName || "",
+        }
+      );
+    }
 
     if (!skipStock) {
       if (Array.isArray(data.entries)) {
         for (const entry of data.entries) {
           if (entry.product && entry.quantity) {
-            await addStock(req.adminId, entry.product, entry.quantity, entry.category, entry.productPrice, entry.rows);
+            await addStock(req.adminId, entry.product, entry.quantity, entry.category, entry.productPrice, entry.rows, data.unit);
           }
         }
       } else if (data.product && data.qty) {
-        await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows);
+        await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows, data.unit);
       }
     }
 

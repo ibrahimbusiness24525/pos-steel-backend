@@ -3,13 +3,15 @@ const router = express.Router();
 const Account = require("../models/Account");
 const { protect } = require("../middleware/auth");
 
+const liveBase = (acc) => {
+  const n = acc.balanceReady ? Number(acc.currentBalance) : Number(acc.openingBalance);
+  return Number.isFinite(n) ? n : 0;
+};
+
 const normalize = (body) => {
   const d = { ...body };
   if (d.type && !d.accountType) d.accountType = d.type;
   if (d.name && !d.accountName) d.accountName = d.name;
-  if (d.openingBalance !== undefined && d.currentBalance === undefined) {
-    d.currentBalance = d.openingBalance;
-  }
   return d;
 };
 
@@ -27,6 +29,13 @@ router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
     const accounts = await Account.find(filter).sort({ createdAt: -1 });
+    for (const acc of accounts) {
+      if (!acc.balanceReady) {
+        acc.currentBalance = Number(acc.openingBalance) || 0;
+        acc.balanceReady = true;
+        await acc.save();
+      }
+    }
     res.json({ success: true, accounts: accounts.map(toFrontend) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -36,6 +45,8 @@ router.get("/", protect, async (req, res) => {
 router.post("/", protect, async (req, res) => {
   try {
     const data = { ...normalize(req.body), adminId: req.adminId };
+    data.currentBalance = Number(data.openingBalance) || 0;
+    data.balanceReady = true;
     const account = await Account.create(data);
     res.status(201).json({ success: true, account: toFrontend(account) });
   } catch (err) {
@@ -65,6 +76,23 @@ router.delete("/:id", protect, async (req, res) => {
     res.json({ success: true, message: "Account deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post("/:id/adjust", protect, async (req, res) => {
+  try {
+    const acc = await Account.findOne({ _id: req.params.id, adminId: req.adminId });
+    if (!acc) return res.status(404).json({ success: false, message: "Account not found" });
+    const amt = Math.abs(Number(req.body.amount) || 0);
+    if (!amt) return res.status(400).json({ success: false, message: "Amount must be greater than 0" });
+    const dir = req.body.direction === "out" ? "out" : "in";
+    const base = liveBase(acc);
+    acc.currentBalance = dir === "out" ? base - amt : base + amt;
+    acc.balanceReady = true;
+    await acc.save();
+    res.json({ success: true, account: toFrontend(acc) });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
   }
 });
 

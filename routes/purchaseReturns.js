@@ -44,6 +44,7 @@ router.post("/", async (req, res) => {
         purchaseId: pid(it.purchaseId || it.purchase),
         productId: pid(it.productId || it.product),
         qty: Number(it.qty) || 0,
+        rate: it.rate != null && it.rate !== "" ? Number(it.rate) : null,
       }))
       .filter((it) => it.qty > 0 && (it.purchaseId || it.productId));
     if (!lines.length) {
@@ -98,7 +99,9 @@ router.post("/", async (req, res) => {
             stockError: true,
           });
         }
-        const rate = bought > 0 ? (Number(purchase.total) || 0) / bought : Number(purchase.rate) || 0;
+        const rate = line.rate != null && Number.isFinite(line.rate)
+          ? line.rate
+          : (bought > 0 ? (Number(purchase.total) || 0) / bought : Number(purchase.rate) || 0);
         if (!invoiceLabel) invoiceLabel = purchase.invoice || purchase.invoiceNum || "";
         if (!supplierName) supplierName = purchase.supplier || purchase.supplierName || "";
         savedItems.push({
@@ -121,7 +124,9 @@ router.post("/", async (req, res) => {
             stockError: true,
           });
         }
-        const rate = Number(prod.purchasePrice) || Number(prod.price) || 0;
+        const rate = line.rate != null && Number.isFinite(line.rate)
+          ? line.rate
+          : (Number(prod.purchasePrice) || Number(prod.price) || 0);
         if (!supplierName) supplierName = mainSupplierName(prod);
         if (!invoiceLabel) invoiceLabel = "STOCK";
         savedItems.push({
@@ -154,7 +159,7 @@ router.post("/", async (req, res) => {
       const updated = await Product.findOneAndUpdate(
         { _id: it.product, adminId: req.adminId, stock: { $gte: amount } },
         { $inc: { stock: -amount } },
-        { new: true }
+        { new: true, runValidators: false }
       );
       if (!updated) {
         await PurchaseReturn.deleteOne({ _id: doc._id });

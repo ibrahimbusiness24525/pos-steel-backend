@@ -9,6 +9,7 @@ const accountSchema = new mongoose.Schema(
     accountNumber: { type: String, default: "" },
     openingBalance: { type: Number, default: 0 },
     currentBalance: { type: Number, default: 0 },
+    balanceReady: { type: Boolean, default: false },
     notes: { type: String, default: "" },
   },
   { timestamps: true }

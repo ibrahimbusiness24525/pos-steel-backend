@@ -22,7 +22,7 @@ async function createOpeningPurchase(req, product, qty) {
   const invoice = `PO-${String(count + 1).padStart(4, "0")}`;
   const rate = Number(product.purchasePrice) || Number(product.price) || 0;
   const supplier = mainSupplierName(product) || "Opening Stock";
-  return Purchase.create({
+  const doc = await Purchase.create({
     adminId: req.adminId,
     createdBy: req.user._id,
     invoice,
@@ -36,10 +36,19 @@ async function createOpeningPurchase(req, product, qty) {
     rate,
     total: +(rate * amount).toFixed(2),
     productPrice: rate,
-    rows: [{ qty: amount, purchasePrice: rate, salePrice: Number(product.price) || 0 }],
+    rows: [{ qty: amount, purchasePrice: rate, salePrice: Number(product.price) || 0, unit: product.unit || "piece" }],
+    unit: product.unit || "piece",
     notes: "Product create",
-    skipStock: true,
   });
+  product.lastInvoice = invoice;
+  product.lastPurchaseDate = doc.date;
+  product.lastSupplier = supplier;
+  await Product.findOneAndUpdate(
+    { _id: product._id },
+    { $set: { lastInvoice: invoice, lastPurchaseDate: doc.date, lastSupplier: supplier } },
+    { runValidators: false }
+  );
+  return doc;
 }
 
 // GET all products — only this admin's products
@@ -47,6 +56,56 @@ router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
     const products = await Product.find(filter).sort({ createdAt: -1 });
+
+    // Purchases used to overwrite Hardware sale price (`price`) with cost.
+    // Restore sale from the purchase row when it was saved separately.
+    const hw = products.filter((p) => {
+      const cat = String(p.category || "").toLowerCase();
+      return cat === "hardware" || cat === "custom";
+    });
+    if (hw.length) {
+      const ids = hw.map((p) => p._id);
+      const bills = await Purchase.find({
+        adminId: req.adminId,
+        product: { $in: ids },
+      }).select("product rows unit createdAt").sort({ createdAt: -1 });
+      const saleById = {};
+      const unitById = {};
+      bills.forEach((b) => {
+        const id = String(b.product || "");
+        if (!id) return;
+        if (unitById[id] == null) {
+          const u = String(b.unit || b.rows?.[0]?.unit || "").trim().toLowerCase();
+          if (u) unitById[id] = u;
+        }
+        if (saleById[id] == null) {
+          const sp = Number(b.rows?.[0]?.salePrice) || 0;
+          if (sp > 0) saleById[id] = sp;
+        }
+      });
+      for (const p of hw) {
+        const id = String(p._id);
+        const cost = Number(p.purchasePrice) || 0;
+        const sale = Number(p.price) || 0;
+        const patch = {};
+        if (String(p.category || "").toLowerCase() === "hardware") {
+          const sp = saleById[id];
+          if (sp && sp !== cost && sale === cost) {
+            p.price = sp;
+            patch.price = sp;
+          }
+        }
+        const u = unitById[id];
+        if (u && String(p.unit || "piece").toLowerCase() !== u) {
+          p.unit = u;
+          patch.unit = u;
+        }
+        if (Object.keys(patch).length) {
+          await Product.updateOne({ _id: p._id }, { $set: patch }, { runValidators: false });
+        }
+      }
+    }
+
     res.json({ success: true, products });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -57,7 +116,11 @@ router.get("/", protect, async (req, res) => {
 router.post("/", protect, async (req, res) => {
   try {
     const data = { ...normalizeProduct(req.body), adminId: req.adminId };
-    const product = await Product.create(data);
+    data.unit = Product.coerceUnit(data.unit || data.stockUnit || "piece");
+    if (data.stockUnit) data.stockUnit = Product.coerceUnit(data.stockUnit);
+    else data.stockUnit = data.unit;
+    const product = new Product(data);
+    await product.save({ validateBeforeSave: false });
     if ((Number(product.stock) || 0) > 0) {
       await createOpeningPurchase(req, product, product.stock);
     }
@@ -113,8 +176,12 @@ router.patch("/:id/stock", protect, async (req, res) => {
     if (type === "add") product.stock += amount;
     else if (type === "remove") product.stock = Math.max(0, product.stock - amount);
     else return res.status(400).json({ success: false, message: "type must be 'add' or 'remove'" });
-    await product.save();
-    res.json({ success: true, product });
+    const updated = await Product.findOneAndUpdate(
+      { _id: product._id, adminId: req.adminId },
+      { $set: { stock: product.stock } },
+      { new: true, runValidators: false }
+    );
+    res.json({ success: true, product: updated || product });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
