@@ -16,6 +16,17 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Session expired, please login again" });
     }
 
+    if (req.user.role === "staff") {
+      if (!req.user.createdBy) {
+        return res.status(401).json({ success: false, message: "Staff account is no longer linked. Please contact admin." });
+      }
+      const admin = await User.findById(req.user.createdBy).select("_id");
+      if (!admin) {
+        await User.deleteOne({ _id: req.user._id });
+        return res.status(401).json({ success: false, message: "Shop account was deleted. Staff login is closed." });
+      }
+    }
+
     // adminId = agar user admin hai to uska apna ID, agar staff hai to uska createdBy (admin ka ID)
     if (req.user.role === "admin") {
       req.adminId = req.user._id;

@@ -77,14 +77,34 @@ router.delete("/admins/:id", protect, superAdminOnly, async (req, res) => {
     if (!user || user.role !== "admin")
       return res.status(404).json({ success: false, message: "Admin not found" });
 
+    await User.deleteMany({ role: "staff", createdBy: user._id });
     await User.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: "Admin removed" });
+    res.json({ success: true, message: "Admin and staff accounts removed" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// GET /api/superadmin/stats — overall stats
+router.delete("/users-by-email", protect, superAdminOnly, async (req, res) => {
+  try {
+    const email = String(req.body?.email || req.query?.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ success: false, message: "Email required" });
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    if (user.role === "superadmin") {
+      return res.status(400).json({ success: false, message: "Cannot delete superadmin" });
+    }
+    let staffDeleted = 0;
+    if (user.role === "admin") {
+      const r = await User.deleteMany({ role: "staff", createdBy: user._id });
+      staffDeleted = r.deletedCount || 0;
+    }
+    await User.deleteOne({ _id: user._id });
+    res.json({ success: true, message: `Removed ${email}`, staffDeleted });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 router.get("/stats", protect, superAdminOnly, async (req, res) => {
   try {
     const adminCount = await User.countDocuments({ role: "admin" });

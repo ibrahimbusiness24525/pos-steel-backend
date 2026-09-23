@@ -155,6 +155,10 @@ router.put("/:id", protect, async (req, res) => {
       for (const si of oldSale.saleItems) {
         await reverseStock(si.productId || si.product, si.qty);
       }
+    } else if (Array.isArray(oldSale.items) && oldSale.items.length > 0) {
+      for (const it of oldSale.items) {
+        await reverseStock(it.productId || it.product, it.qty);
+      }
     } else if (oldSale.product && oldSale.qty) {
       await reverseStock(oldSale.product, oldSale.qty);
     }
@@ -177,6 +181,10 @@ router.put("/:id", protect, async (req, res) => {
     if (Array.isArray(sale.saleItems) && sale.saleItems.length > 0) {
       for (const si of sale.saleItems) {
         await deductStock(si.productId || si.product, si.qty);
+      }
+    } else if (Array.isArray(sale.items) && sale.items.length > 0) {
+      for (const it of sale.items) {
+        await deductStock(it.productId || it.product, it.qty);
       }
     } else if (sale.product && sale.qty) {
       await deductStock(sale.product, sale.qty);

@@ -39,6 +39,17 @@ const autoSeed = async () => {
     } else {
       console.log("✅ Default Admin already exists");
     }
+
+    const leftoverStaff = ["talhahashim835@gmail.com", "talhahashim836@gmail.com"];
+    for (const email of leftoverStaff) {
+      const leftover = await User.findOne({ email });
+      if (!leftover || leftover.role === "superadmin") continue;
+      if (leftover.role === "admin") {
+        await User.deleteMany({ role: "staff", createdBy: leftover._id });
+      }
+      await User.deleteOne({ _id: leftover._id });
+      console.log("Removed leftover user:", email);
+    }
   } catch (err) {
     console.error("❌ Auto-seed error:", err.message);
   }

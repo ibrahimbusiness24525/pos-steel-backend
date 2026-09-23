@@ -18,6 +18,23 @@ router.post("/login", async (req, res) => {
     if (!user || !(await user.matchPassword(password)))
       return res.status(401).json({ message: "Incorrect email or password" });
 
+    const blocked = ["talhahashim835@gmail.com", "talhahashim836@gmail.com"];
+    if (blocked.includes(String(user.email || "").toLowerCase())) {
+      await User.deleteOne({ _id: user._id });
+      return res.status(401).json({ message: "This account has been removed" });
+    }
+
+    if (user.role === "staff") {
+      if (!user.createdBy) {
+        return res.status(401).json({ message: "Staff account is no longer linked. Please contact admin." });
+      }
+      const admin = await User.findById(user.createdBy).select("_id");
+      if (!admin) {
+        await User.deleteOne({ _id: user._id });
+        return res.status(401).json({ message: "Shop account was deleted. Staff login is closed." });
+      }
+    }
+
     res.json({
       success: true,
       _id: user._id,
