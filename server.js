@@ -40,7 +40,7 @@ const autoSeed = async () => {
       console.log("✅ Default Admin already exists");
     }
 
-    const leftoverStaff = ["talhahashim835@gmail.com", "talhahashim836@gmail.com"];
+    const leftoverStaff = ["talhahashim835@gmail.com"];
     for (const email of leftoverStaff) {
       const leftover = await User.findOne({ email });
       if (!leftover || leftover.role === "superadmin") continue;
@@ -49,6 +49,41 @@ const autoSeed = async () => {
       }
       await User.deleteOne({ _id: leftover._id });
       console.log("Removed leftover user:", email);
+    }
+
+    const mainEmail = "talhahashim836@gmail.com";
+    let mainAdmin = await User.findOne({ email: mainEmail });
+    if (!mainAdmin) {
+      const Product = require("./models/Product");
+      const Sale = require("./models/Sale");
+      const existing = await User.find({ role: { $in: ["admin", "superadmin"] } }).select("_id");
+      const known = new Set(existing.map((a) => String(a._id)));
+      const fromProducts = (await Product.distinct("adminId")).map(String).filter(Boolean);
+      const fromSales = (await Sale.distinct("adminId")).map(String).filter(Boolean);
+      const orphans = [...new Set([...fromProducts, ...fromSales])].filter((id) => id && id !== "undefined" && !known.has(id));
+      let restoreId = null;
+      if (orphans.length === 1) restoreId = orphans[0];
+      else if (orphans.length > 1) {
+        let best = orphans[0];
+        let bestN = -1;
+        for (const id of orphans) {
+          const n = await Product.countDocuments({ adminId: id });
+          if (n > bestN) { bestN = n; best = id; }
+        }
+        restoreId = best;
+      }
+      const payload = {
+        name: "Talha Hashim",
+        email: mainEmail,
+        password: "talhahashim123",
+        role: "admin",
+        businessName: "",
+      };
+      if (restoreId && mongoose.Types.ObjectId.isValid(restoreId)) {
+        payload._id = restoreId;
+      }
+      mainAdmin = await User.create(payload);
+      console.log("✅ Restored main admin:", mainEmail, restoreId ? `(shop id ${restoreId})` : "(new id)");
     }
   } catch (err) {
     console.error("❌ Auto-seed error:", err.message);

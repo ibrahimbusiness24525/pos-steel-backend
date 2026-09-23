@@ -18,7 +18,7 @@ router.post("/login", async (req, res) => {
     if (!user || !(await user.matchPassword(password)))
       return res.status(401).json({ message: "Incorrect email or password" });
 
-    const blocked = ["talhahashim835@gmail.com", "talhahashim836@gmail.com"];
+    const blocked = ["talhahashim835@gmail.com"];
     if (blocked.includes(String(user.email || "").toLowerCase())) {
       await User.deleteOne({ _id: user._id });
       return res.status(401).json({ message: "This account has been removed" });
