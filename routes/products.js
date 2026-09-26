@@ -85,12 +85,11 @@ router.get("/", protect, async (req, res) => {
       });
       for (const p of hw) {
         const id = String(p._id);
-        const cost = Number(p.purchasePrice) || 0;
         const sale = Number(p.price) || 0;
         const patch = {};
         if (String(p.category || "").toLowerCase() === "hardware") {
           const sp = saleById[id];
-          if (sp && sp !== cost && sale === cost) {
+          if (sp > 0 && sale <= 0) {
             p.price = sp;
             patch.price = sp;
           }
@@ -142,10 +141,17 @@ router.put("/:id", protect, async (req, res) => {
   try {
     const filter = { _id: req.params.id, adminId: req.adminId };
     const updateData = normalizeProduct(req.body);
-    delete updateData.stock; // stock is never touched by a generic product edit
+    delete updateData.stock;
+    delete updateData._id;
+    delete updateData.id;
+    delete updateData.__v;
+    delete updateData.adminId;
+    delete updateData.createdAt;
+    delete updateData.updatedAt;
+    delete updateData.createdBy;
     const product = await Product.findOneAndUpdate(
       filter,
-      updateData,
+      { $set: updateData },
       { new: true, runValidators: false }
     );
     if (!product) return res.status(404).json({ success: false, message: "Product not found" });
