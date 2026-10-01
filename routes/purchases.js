@@ -5,6 +5,35 @@ const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
 
+function purchaseSnapshot(doc) {
+  if (!doc) return {};
+  const o = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  return {
+    invoice: o.invoice || o.invoiceNum || "",
+    date: o.date || "",
+    supplier: o.supplier || o.supplierName || "",
+    productName: o.productName || "",
+    qty: Number(o.qty) || 0,
+    rate: Number(o.rate) || Number(o.productPrice) || 0,
+    total: Number(o.total) || 0,
+    paidAmount: Number(o.paidAmount) || 0,
+    remainingAmount: Number(o.remainingAmount) || 0,
+    paymentMethod: o.paymentMethod || "",
+  };
+}
+
+function purchaseEditSummary(before, after) {
+  const bits = [];
+  if (String(before.supplier || "") !== String(after.supplier || "")) bits.push("supplier");
+  if (String(before.date || "") !== String(after.date || "")) bits.push("date");
+  if (String(before.productName || "") !== String(after.productName || "")) bits.push("product");
+  if (Math.abs((Number(before.qty) || 0) - (Number(after.qty) || 0)) > 0.009) bits.push("qty");
+  if (Math.abs((Number(before.rate) || 0) - (Number(after.rate) || 0)) > 0.009) bits.push("rate");
+  if (Math.abs((Number(before.total) || 0) - (Number(after.total) || 0)) > 0.009) bits.push("total");
+  if (String(before.paymentMethod || "") !== String(after.paymentMethod || "")) bits.push("payment");
+  return bits.length ? bits.join(", ") : "updated";
+}
+
 // GET all purchases — only this admin's purchases
 router.get("/", protect, async (req, res) => {
   try {
@@ -142,7 +171,28 @@ router.put("/:id", protect, async (req, res) => {
       );
     }
 
-    const purchase = await Purchase.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    const beforeSnap = purchaseSnapshot(old);
+    const afterSnap = purchaseSnapshot({ ...old.toObject(), ...req.body });
+    const { editHistory: _ignoreHistory, ...bodyWithoutHistory } = req.body || {};
+    const historyEntry = {
+      at: new Date(),
+      byUserId: req.user?._id,
+      byName: req.user?.name || "",
+      byEmail: req.user?.email || "",
+      summary: purchaseEditSummary(beforeSnap, afterSnap),
+      before: beforeSnap,
+      after: afterSnap,
+    };
+
+    const purchase = await Purchase.findOneAndUpdate(
+      { _id: req.params.id, adminId: req.adminId },
+      {
+        $set: bodyWithoutHistory,
+        $push: { editHistory: historyEntry },
+      },
+      { new: true, runValidators: true }
+    );
+    if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
     // Apply new stock
     if (Array.isArray(req.body.entries)) {

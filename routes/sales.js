@@ -5,6 +5,40 @@ const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
 
+function saleSnapshot(doc) {
+  if (!doc) return {};
+  const o = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  return {
+    invoice: o.invoice || o.invoiceNum || "",
+    date: o.date || "",
+    customer: o.customer || "",
+    total: Number(o.grandTotal) || Number(o.total) || 0,
+    paidAmount: Number(o.paidAmount) || 0,
+    remainingAmount: Number(o.remainingAmount) || 0,
+    paymentMethod: o.paymentMethod || "",
+    productName: o.productName || "",
+    qty: Number(o.qty) || 0,
+    items: Array.isArray(o.items)
+      ? o.items.map((it) => ({
+          productName: it.productName || "",
+          qty: Number(it.qty) || 0,
+          subtotal: Number(it.subtotal) || 0,
+        }))
+      : [],
+  };
+}
+
+function saleEditSummary(before, after) {
+  const bits = [];
+  if (String(before.customer || "") !== String(after.customer || "")) bits.push("customer");
+  if (String(before.date || "") !== String(after.date || "")) bits.push("date");
+  if (Math.abs((Number(before.total) || 0) - (Number(after.total) || 0)) > 0.009) bits.push("total");
+  if (Math.abs((Number(before.qty) || 0) - (Number(after.qty) || 0)) > 0.009) bits.push("qty");
+  if (String(before.paymentMethod || "") !== String(after.paymentMethod || "")) bits.push("payment");
+  if (JSON.stringify(before.items || []) !== JSON.stringify(after.items || [])) bits.push("items");
+  return bits.length ? bits.join(", ") : "updated";
+}
+
 // GET all sales
 router.get("/", protect, async (req, res) => {
   try {
@@ -163,9 +197,25 @@ router.put("/:id", protect, async (req, res) => {
       await reverseStock(oldSale.product, oldSale.qty);
     }
 
+    const beforeSnap = saleSnapshot(oldSale);
+    const afterSnap = saleSnapshot({ ...oldSale.toObject(), ...req.body });
+    const { editHistory: _ignoreHistory, ...bodyWithoutHistory } = req.body || {};
+    const historyEntry = {
+      at: new Date(),
+      byUserId: req.user?._id,
+      byName: req.user?.name || "",
+      byEmail: req.user?.email || "",
+      summary: saleEditSummary(beforeSnap, afterSnap),
+      before: beforeSnap,
+      after: afterSnap,
+    };
+
     const sale = await Sale.findOneAndUpdate(
       { _id: req.params.id, adminId: req.adminId },
-      req.body,
+      {
+        $set: bodyWithoutHistory,
+        $push: { editHistory: historyEntry },
+      },
       { new: true, runValidators: false }
     );
     if (!sale) return res.status(404).json({ success: false, message: "Sale not found" });

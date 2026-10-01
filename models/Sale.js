@@ -37,6 +37,18 @@ const saleSchema = new mongoose.Schema(
     totalAmount:     { type: Number, default: 0 },
     notes:           { type: String, default: "" },
     createdBy:       { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    editHistory:     {
+      type: [{
+        at: { type: Date, default: Date.now },
+        byUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        byName: { type: String, default: "" },
+        byEmail: { type: String, default: "" },
+        summary: { type: String, default: "" },
+        before: { type: mongoose.Schema.Types.Mixed },
+        after: { type: mongoose.Schema.Types.Mixed },
+      }],
+      default: [],
+    },
   },
   { timestamps: true, strict: false }
 );
