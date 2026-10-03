@@ -4,6 +4,7 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
+const { pid, purchaseLineQty, reconcileProductStock } = require("../utils/stockReconcile");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -13,7 +14,7 @@ function purchaseSnapshot(doc) {
     date: o.date || "",
     supplier: o.supplier || o.supplierName || "",
     productName: o.productName || "",
-    qty: Number(o.qty) || 0,
+    qty: purchaseLineQty(o),
     rate: Number(o.rate) || Number(o.productPrice) || 0,
     total: Number(o.total) || 0,
     paidAmount: Number(o.paidAmount) || 0,
@@ -32,6 +33,17 @@ function purchaseEditSummary(before, after) {
   if (Math.abs((Number(before.total) || 0) - (Number(after.total) || 0)) > 0.009) bits.push("total");
   if (String(before.paymentMethod || "") !== String(after.paymentMethod || "")) bits.push("payment");
   return bits.length ? bits.join(", ") : "updated";
+}
+
+async function adjustStock(adminId, productId, delta) {
+  const id = pid(productId);
+  const n = Number(delta) || 0;
+  if (!id || !n) return;
+  await Product.findOneAndUpdate(
+    { _id: id, adminId },
+    { $inc: { stock: n } },
+    { runValidators: false }
+  );
 }
 
 // GET all purchases — only this admin's purchases
@@ -154,26 +166,28 @@ router.put("/:id", protect, async (req, res) => {
     const old = await Purchase.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!old) return res.status(404).json({ success: false, message: "Purchase not found" });
 
-    // Reverse old stock
-    if (Array.isArray(old.entries)) {
-      for (const entry of old.entries) {
-        if (entry.product && entry.quantity) {
-          await Product.findOneAndUpdate(
-            { _id: entry.product, adminId: req.adminId },
-            { $inc: { stock: -Number(entry.quantity) } }
-          );
-        }
-      }
-    } else if (old.product && old.qty) {
-      await Product.findOneAndUpdate(
-        { _id: old.product, adminId: req.adminId },
-        { $inc: { stock: -Number(old.qty) } }
-      );
+    const beforeSnap = purchaseSnapshot(old);
+    const { editHistory: _ignoreHistory, ...bodyWithoutHistory } = req.body || {};
+    // Keep qty filled from rows when client sends 0/empty but rows have quantity.
+    if (!(Number(bodyWithoutHistory.qty) > 0)) {
+      const fromRows = purchaseLineQty({ ...old.toObject(), ...bodyWithoutHistory });
+      if (fromRows > 0) bodyWithoutHistory.qty = fromRows;
     }
 
-    const beforeSnap = purchaseSnapshot(old);
-    const afterSnap = purchaseSnapshot({ ...old.toObject(), ...req.body });
-    const { editHistory: _ignoreHistory, ...bodyWithoutHistory } = req.body || {};
+    const oldPid = pid(old.product);
+    const newPid = pid(bodyWithoutHistory.product) || oldPid;
+    const oldQty = purchaseLineQty(old);
+    const newQty = purchaseLineQty({ ...old.toObject(), ...bodyWithoutHistory });
+    const productChanged = oldPid && newPid && oldPid !== newPid;
+    const qtyChanged = Math.abs(oldQty - newQty) > 0.0001;
+
+    // Date/supplier/price-only edits must NOT touch stock (was doubling stock before).
+    if (productChanged || qtyChanged) {
+      if (oldPid && oldQty) await adjustStock(req.adminId, oldPid, -oldQty);
+      if (newPid && newQty) await adjustStock(req.adminId, newPid, newQty);
+    }
+
+    const afterSnap = purchaseSnapshot({ ...old.toObject(), ...bodyWithoutHistory });
     const historyEntry = {
       at: new Date(),
       byUserId: req.user?._id,
@@ -194,22 +208,9 @@ router.put("/:id", protect, async (req, res) => {
     );
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
-    // Apply new stock
-    if (Array.isArray(req.body.entries)) {
-      for (const entry of req.body.entries) {
-        if (entry.product && entry.quantity) {
-          await Product.findOneAndUpdate(
-            { _id: entry.product, adminId: req.adminId },
-            { $inc: { stock: Number(entry.quantity) } }
-          );
-        }
-      }
-    } else if (req.body.product && req.body.qty) {
-      await Product.findOneAndUpdate(
-        { _id: req.body.product, adminId: req.adminId },
-        { $inc: { stock: Number(req.body.qty) } }
-      );
-    }
+    // Rebuild absolute stock from purchases/sales so old double-counts get corrected.
+    const touch = [...new Set([oldPid, newPid, pid(purchase.product)].filter(Boolean))];
+    if (touch.length) await reconcileProductStock(req.adminId, touch);
 
     res.json({ success: true, purchase });
   } catch (err) {

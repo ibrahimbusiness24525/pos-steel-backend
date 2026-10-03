@@ -3,6 +3,7 @@ const router = express.Router();
 const Product = require("../models/Product");
 const Purchase = require("../models/Purchase");
 const { protect } = require("../middleware/auth");
+const { reconcileProductStock } = require("../utils/stockReconcile");
 
 const normalizeProduct = (body) => {
   const d = { ...body };
@@ -50,6 +51,19 @@ async function createOpeningPurchase(req, product, qty) {
   );
   return doc;
 }
+
+// Rebuild product.stock from purchases − returns − sales + sale-returns
+router.post("/reconcile-stock", protect, async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.productIds) ? req.body.productIds : [];
+    const result = await reconcileProductStock(req.adminId, ids);
+    const filter = req.adminId ? { adminId: req.adminId } : {};
+    const products = await Product.find(filter).sort({ createdAt: -1 });
+    res.json({ success: true, fixed: result.fixed, products });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 // GET all products — only this admin's products
 router.get("/", protect, async (req, res) => {
