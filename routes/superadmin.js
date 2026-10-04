@@ -78,6 +78,10 @@ router.delete("/admins/:id", protect, superAdminOnly, async (req, res) => {
       return res.status(404).json({ success: false, message: "Admin not found" });
 
     await User.deleteMany({ role: "staff", createdBy: user._id });
+    try {
+      const ShopProfile = require("../models/ShopProfile");
+      await ShopProfile.deleteOne({ adminId: user._id });
+    } catch { /* ignore */ }
     await User.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Admin and staff accounts removed" });
   } catch (err) {
@@ -98,6 +102,10 @@ router.delete("/users-by-email", protect, superAdminOnly, async (req, res) => {
     if (user.role === "admin") {
       const r = await User.deleteMany({ role: "staff", createdBy: user._id });
       staffDeleted = r.deletedCount || 0;
+      try {
+        const ShopProfile = require("../models/ShopProfile");
+        await ShopProfile.deleteOne({ adminId: user._id });
+      } catch { /* ignore */ }
     }
     await User.deleteOne({ _id: user._id });
     res.json({ success: true, message: `Removed ${email}`, staffDeleted });

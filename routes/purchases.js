@@ -130,6 +130,19 @@ router.post("/", protect, async (req, res) => {
     if (data.invoice && !data.invoiceNum) data.invoiceNum = data.invoice;
     if (!data.invoice && data.invoiceNum) data.invoice = data.invoiceNum;
 
+    // Resolve product by name when id is missing — otherwise stock/lots skip this PO.
+    if (!pid(data.product) && data.productName) {
+      const byName = await Product.findOne({
+        adminId: req.adminId,
+        name: new RegExp(`^${String(data.productName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+      }).select("_id");
+      if (byName) data.product = byName._id;
+    }
+    if (!(Number(data.qty) > 0)) {
+      const fromRows = purchaseLineQty(data);
+      if (fromRows > 0) data.qty = fromRows;
+    }
+
     const purchase = await Purchase.create(data);
 
     if (purchase.product) {
@@ -154,6 +167,10 @@ router.post("/", protect, async (req, res) => {
         await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows, data.unit);
       }
     }
+
+    // Absolute rebuild so a missed $inc / bad id cannot leave stock list wrong.
+    const touch = pid(purchase.product);
+    if (touch) await reconcileProductStock(req.adminId, [touch]);
 
     res.status(201).json({ success: true, purchase });
   } catch (err) {

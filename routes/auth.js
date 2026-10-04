@@ -41,6 +41,8 @@ router.post("/login", async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      createdBy: user.createdBy || null,
+      businessName: user.businessName || "",
       token: generateToken(user._id),
     });
   } catch (err) {

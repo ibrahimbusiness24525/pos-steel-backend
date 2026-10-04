@@ -35,37 +35,66 @@ async function computeStockByProduct(adminId) {
   const sold = {};
   const saleRet = {};
 
-  const [purchases, purchaseReturns, sales, saleReturns] = await Promise.all([
-    Purchase.find({ adminId }).select("product qty rows entries").lean(),
+  const [products, purchases, purchaseReturns, sales, saleReturns] = await Promise.all([
+    Product.find({ adminId }).select("_id name").lean(),
+    Purchase.find({ adminId }).select("product productName qty rows entries").lean(),
     PurchaseReturn.find({ adminId }).select("items").lean(),
-    Sale.find({ adminId }).select("product qty saleItems items").lean(),
+    Sale.find({ adminId }).select("product productName qty saleItems items").lean(),
     SaleReturn.find({ adminId }).select("items").lean(),
   ]);
 
+  const nameToId = new Map();
+  (products || []).forEach((p) => {
+    const id = pid(p._id);
+    const name = String(p.name || "").trim().toLowerCase();
+    if (id && name && !nameToId.has(name)) nameToId.set(name, id);
+  });
+  const resolveId = (rawId, rawName) => {
+    const id = pid(rawId);
+    if (id) return id;
+    const name = String(rawName || "").trim().toLowerCase();
+    return name ? (nameToId.get(name) || "") : "";
+  };
+
   purchases.forEach((p) => {
     if (Array.isArray(p.entries) && p.entries.length) {
-      p.entries.forEach((e) => addMap(purchased, e.product || e.productId, e.quantity || e.qty));
+      p.entries.forEach((e) => {
+        addMap(
+          purchased,
+          resolveId(e.product || e.productId, e.productName || e.name || p.productName),
+          e.quantity || e.qty
+        );
+      });
     } else {
-      addMap(purchased, p.product, purchaseLineQty(p));
+      addMap(purchased, resolveId(p.product, p.productName), purchaseLineQty(p));
     }
   });
 
   purchaseReturns.forEach((r) => {
-    (r.items || []).forEach((it) => addMap(purchRet, it.product || it.productId, it.qty));
+    (r.items || []).forEach((it) => {
+      addMap(purchRet, resolveId(it.product || it.productId, it.productName || it.name), it.qty);
+    });
   });
 
   sales.forEach((s) => {
     if (Array.isArray(s.saleItems) && s.saleItems.length) {
-      s.saleItems.forEach((si) => addMap(sold, si.productId || si.product, si.qty));
+      s.saleItems.forEach((si) => {
+        addMap(sold, resolveId(si.productId || si.product, si.productName || s.productName), si.qty);
+      });
     } else if (Array.isArray(s.items) && s.items.length) {
-      s.items.forEach((it) => addMap(sold, it.productId || it.product, it.qty));
+      s.items.forEach((it) => {
+        const q = Number(it.qty) || Number(it.rows?.[0]?.qty) || 0;
+        addMap(sold, resolveId(it.productId || it.product, it.productName || s.productName), q);
+      });
     } else {
-      addMap(sold, s.product, s.qty);
+      addMap(sold, resolveId(s.product, s.productName), s.qty);
     }
   });
 
   saleReturns.forEach((r) => {
-    (r.items || []).forEach((it) => addMap(saleRet, it.product || it.productId, it.qty));
+    (r.items || []).forEach((it) => {
+      addMap(saleRet, resolveId(it.product || it.productId, it.productName || it.name), it.qty);
+    });
   });
 
   const ids = new Set([
