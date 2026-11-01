@@ -39,14 +39,22 @@ function saleEditSummary(before, after) {
   return bits.length ? bits.join(", ") : "updated";
 }
 
-// GET all sales
+// GET sales for this shop. One response must stay under Netlify's 6MB limit,
+// so the list is paged. Clients walk every page; nothing is dropped.
 router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const total = await Sale.countDocuments(filter);
+    const pages = Math.max(1, Math.ceil(total / limit) || 1);
     const sales = await Sale.find(filter)
       .populate("createdBy", "name email role")
-      .sort({ createdAt: -1 });
-    res.json({ success: true, sales });
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((Math.min(page, pages) - 1) * limit)
+      .limit(limit)
+      .lean();
+    res.json({ success: true, sales, total, page: Math.min(page, pages), pages, limit });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

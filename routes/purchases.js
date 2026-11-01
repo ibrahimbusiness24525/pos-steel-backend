@@ -4,7 +4,7 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { pid, purchaseLineQty, reconcileProductStock } = require("../utils/stockReconcile");
+const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct } = require("../utils/stockReconcile");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -114,8 +114,11 @@ const addStock = async (adminId, productId, qty, category, productPrice, rows, u
     { new: true, runValidators: false }
   );
   if (!updated) {
-    console.warn(`[PURCHASE] Stock NOT added for product ${productId} — product not found under adminId ${adminId}.`);
+    throw new Error(
+      `Stock update failed — product not found in this shop (id: ${productId}). Purchase was not saved.`
+    );
   }
+  return updated;
 };
 
 router.post("/", protect, async (req, res) => {
@@ -130,22 +133,80 @@ router.post("/", protect, async (req, res) => {
     if (data.invoice && !data.invoiceNum) data.invoiceNum = data.invoice;
     if (!data.invoice && data.invoiceNum) data.invoice = data.invoiceNum;
 
-    // Resolve product by name when id is missing — otherwise stock/lots skip this PO.
-    if (!pid(data.product) && data.productName) {
-      const byName = await Product.findOne({
-        adminId: req.adminId,
-        name: new RegExp(`^${String(data.productName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-      }).select("_id");
-      if (byName) data.product = byName._id;
+    // Must resolve to a product owned by this admin — never save a PO that cannot update stock.
+    const owned = await resolveOwnedProduct(req.adminId, data.product, data.productName);
+    if (!owned) {
+      return res.status(400).json({
+        success: false,
+        message: `Product "${data.productName || data.product || ""}" not found in this shop. Add the product first, then save purchase.`,
+      });
     }
+    data.product = owned._id;
+    if (!data.productName) data.productName = owned.name;
+    if (!data.category && owned.category) data.category = owned.category;
+
     if (!(Number(data.qty) > 0)) {
       const fromRows = purchaseLineQty(data);
       if (fromRows > 0) data.qty = fromRows;
     }
+    if (!(Number(data.qty) > 0) && !skipStock) {
+      return res.status(400).json({
+        success: false,
+        message: "Purchase quantity is required so stock can be updated.",
+      });
+    }
+
+    // Resolve multi-entry lines to owned products before save.
+    if (Array.isArray(data.entries) && data.entries.length) {
+      for (const entry of data.entries) {
+        if (!entry.quantity && !entry.qty) continue;
+        const entryOwned = await resolveOwnedProduct(
+          req.adminId,
+          entry.product || entry.productId,
+          entry.productName || entry.name || data.productName
+        );
+        if (!entryOwned) {
+          return res.status(400).json({
+            success: false,
+            message: `Product "${entry.productName || entry.product || ""}" not found in this shop.`,
+          });
+        }
+        entry.product = entryOwned._id;
+        if (!entry.productName) entry.productName = entryOwned.name;
+      }
+    }
 
     const purchase = await Purchase.create(data);
 
-    if (purchase.product) {
+    try {
+      if (!skipStock) {
+        if (Array.isArray(data.entries) && data.entries.length) {
+          for (const entry of data.entries) {
+            if (entry.product && (entry.quantity || entry.qty)) {
+              await addStock(
+                req.adminId,
+                entry.product,
+                entry.quantity || entry.qty,
+                entry.category || data.category,
+                entry.productPrice,
+                entry.rows,
+                data.unit
+              );
+            }
+          }
+        } else if (data.product && data.qty) {
+          await addStock(
+            req.adminId,
+            data.product,
+            data.qty,
+            data.category,
+            data.productPrice,
+            data.rows,
+            data.unit
+          );
+        }
+      }
+
       await Product.findOneAndUpdate(
         { _id: purchase.product, adminId: req.adminId },
         {
@@ -154,23 +215,19 @@ router.post("/", protect, async (req, res) => {
           lastSupplier: purchase.supplier || purchase.supplierName || "",
         }
       );
-    }
 
-    if (!skipStock) {
-      if (Array.isArray(data.entries)) {
-        for (const entry of data.entries) {
-          if (entry.product && entry.quantity) {
-            await addStock(req.adminId, entry.product, entry.quantity, entry.category, entry.productPrice, entry.rows, data.unit);
-          }
-        }
-      } else if (data.product && data.qty) {
-        await addStock(req.adminId, data.product, data.qty, data.category, data.productPrice, data.rows, data.unit);
+      // Absolute rebuild so a missed $inc cannot leave stock list wrong.
+      const touch = pid(purchase.product);
+      if (touch) await reconcileProductStock(req.adminId, [touch]);
+    } catch (stockErr) {
+      // Never leave a bill that did not update this shop's stock.
+      await Purchase.deleteOne({ _id: purchase._id, adminId: req.adminId });
+      const touch = pid(purchase.product);
+      if (touch) {
+        try { await reconcileProductStock(req.adminId, [touch]); } catch (_) { /* best effort */ }
       }
+      throw stockErr;
     }
-
-    // Absolute rebuild so a missed $inc / bad id cannot leave stock list wrong.
-    const touch = pid(purchase.product);
-    if (touch) await reconcileProductStock(req.adminId, [touch]);
 
     res.status(201).json({ success: true, purchase });
   } catch (err) {
@@ -191,8 +248,22 @@ router.put("/:id", protect, async (req, res) => {
       if (fromRows > 0) bodyWithoutHistory.qty = fromRows;
     }
 
+    const owned = await resolveOwnedProduct(
+      req.adminId,
+      bodyWithoutHistory.product || old.product,
+      bodyWithoutHistory.productName || old.productName
+    );
+    if (!owned) {
+      return res.status(400).json({
+        success: false,
+        message: `Product "${bodyWithoutHistory.productName || old.productName || ""}" not found in this shop. Cannot update purchase.`,
+      });
+    }
+    bodyWithoutHistory.product = owned._id;
+    if (!bodyWithoutHistory.productName) bodyWithoutHistory.productName = owned.name;
+
     const oldPid = pid(old.product);
-    const newPid = pid(bodyWithoutHistory.product) || oldPid;
+    const newPid = pid(owned._id);
     const oldQty = purchaseLineQty(old);
     const newQty = purchaseLineQty({ ...old.toObject(), ...bodyWithoutHistory });
     const productChanged = oldPid && newPid && oldPid !== newPid;

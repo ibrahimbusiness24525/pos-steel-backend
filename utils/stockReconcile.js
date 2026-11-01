@@ -14,12 +14,18 @@ function purchaseLineQty(p) {
   const q = Number(p?.qty);
   if (q > 0) return q;
   if (Array.isArray(p?.entries) && p.entries.length) {
-    return p.entries.reduce((s, e) => s + (Number(e.quantity) || Number(e.qty) || 0), 0);
+    const fromEntries = p.entries.reduce((s, e) => s + (Number(e.quantity) || Number(e.qty) || 0), 0);
+    if (fromEntries > 0) return fromEntries;
   }
-  return (p?.rows || []).reduce(
-    (s, r) => s + (Number(r.qty) || Number(r.quantity) || Number(r.weight) || Number(r.feet) || 0),
+  const fromRows = (p?.rows || []).reduce(
+    (s, r) => s + (Number(r.qty) || Number(r.quantity) || Number(r.pieces) || Number(r.weight) || Number(r.feet) || 0),
     0
   );
+  if (fromRows > 0) return fromRows;
+  const rate = Number(p?.rate) || Number(p?.productPrice) || Number(p?.rows?.[0]?.purchasePrice) || 0;
+  const total = Number(p?.total) || Number(p?.totalAmount) || 0;
+  if (rate > 0 && total > 0) return Math.round((total / rate) * 1000) / 1000;
+  return 0;
 }
 
 function addMap(map, id, qty) {
@@ -27,6 +33,56 @@ function addMap(map, id, qty) {
   const n = Number(qty) || 0;
   if (!key || n === 0) return;
   map[key] = (map[key] || 0) + n;
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Only accept product ids that belong to this admin; otherwise resolve by name. */
+function makeResolveId(products) {
+  const ownedIds = new Set();
+  const nameToId = new Map();
+  (products || []).forEach((p) => {
+    const id = pid(p._id);
+    const name = String(p.name || "").trim().toLowerCase();
+    if (id) ownedIds.add(id);
+    if (id && name && !nameToId.has(name)) nameToId.set(name, id);
+  });
+  return (rawId, rawName) => {
+    const id = pid(rawId);
+    if (id && ownedIds.has(id)) return id;
+    const name = String(rawName || "").trim().toLowerCase();
+    return name ? nameToId.get(name) || "" : "";
+  };
+}
+
+/**
+ * Fix purchases whose product id points outside this shop (or is missing)
+ * by re-linking to the same-named product under adminId.
+ */
+async function repairPurchaseProductLinks(adminId) {
+  if (!adminId) return 0;
+  const products = await Product.find({ adminId }).select("_id name").lean();
+  const ownedIds = new Set(products.map((p) => pid(p._id)).filter(Boolean));
+  const nameToId = new Map();
+  products.forEach((p) => {
+    const n = String(p.name || "").trim().toLowerCase();
+    if (n && !nameToId.has(n)) nameToId.set(n, pid(p._id));
+  });
+
+  const purchases = await Purchase.find({ adminId }).select("_id product productName").lean();
+  let repaired = 0;
+  for (const p of purchases) {
+    const id = pid(p.product);
+    if (id && ownedIds.has(id)) continue;
+    const name = String(p.productName || "").trim().toLowerCase();
+    const correct = name ? nameToId.get(name) : "";
+    if (!correct) continue;
+    await Purchase.updateOne({ _id: p._id, adminId }, { $set: { product: correct } });
+    repaired += 1;
+  }
+  return repaired;
 }
 
 async function computeStockByProduct(adminId) {
@@ -43,18 +99,7 @@ async function computeStockByProduct(adminId) {
     SaleReturn.find({ adminId }).select("items").lean(),
   ]);
 
-  const nameToId = new Map();
-  (products || []).forEach((p) => {
-    const id = pid(p._id);
-    const name = String(p.name || "").trim().toLowerCase();
-    if (id && name && !nameToId.has(name)) nameToId.set(name, id);
-  });
-  const resolveId = (rawId, rawName) => {
-    const id = pid(rawId);
-    if (id) return id;
-    const name = String(rawName || "").trim().toLowerCase();
-    return name ? (nameToId.get(name) || "") : "";
-  };
+  const resolveId = makeResolveId(products);
 
   purchases.forEach((p) => {
     if (Array.isArray(p.entries) && p.entries.length) {
@@ -113,6 +158,9 @@ async function computeStockByProduct(adminId) {
 }
 
 async function reconcileProductStock(adminId, productIds = []) {
+  // Relink orphan / foreign product ids before computing stock.
+  await repairPurchaseProductLinks(adminId);
+
   const wanted = (productIds || []).map(pid).filter(Boolean);
   const byId = await computeStockByProduct(adminId);
   const ids = wanted.length ? wanted : Object.keys(byId);
@@ -129,9 +177,26 @@ async function reconcileProductStock(adminId, productIds = []) {
   return { fixed, stocks: byId };
 }
 
+async function resolveOwnedProduct(adminId, productId, productName) {
+  const id = pid(productId);
+  if (id) {
+    const byId = await Product.findOne({ _id: id, adminId }).select("_id name category unit");
+    if (byId) return byId;
+  }
+  const name = String(productName || "").trim();
+  if (!name) return null;
+  return Product.findOne({
+    adminId,
+    name: new RegExp(`^${escapeRegExp(name)}$`, "i"),
+  }).select("_id name category unit");
+}
+
 module.exports = {
   pid,
   purchaseLineQty,
   computeStockByProduct,
   reconcileProductStock,
+  repairPurchaseProductLinks,
+  resolveOwnedProduct,
+  escapeRegExp,
 };

@@ -150,6 +150,12 @@ app.use("/api/shop-profile",      require("./routes/shopProfile"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "SteelPOS Backend Running ✅", port: process.env.PORT || 5000 }));
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "SteelPOS Backend Running",
+    db: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+  });
+});
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
@@ -160,23 +166,25 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: "Internal server error" });
 });
 
-// ── Start server on 0.0.0.0 (sab interfaces pe listen) ───────────────────────
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log("─────────────────────────────────────────");
-  console.log(`🚀 SteelPOS Backend running!`);
-  console.log(`🌐 Local:   http://localhost:${PORT}`);
-  console.log(`🌐 Network: http://127.0.0.1:${PORT}`);
-  console.log(`✅ CORS:    All HTTPS origins allowed`);
-  console.log("─────────────────────────────────────────");
-});
+module.exports = { app, connectDB };
 
-server.on("error", (err) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(`❌ Port ${PORT} already in use!`);
-    console.error(`   Task Manager mein node.js process band karo, phir dobara chalaao.`);
-    process.exit(1);
-  } else {
-    console.error("❌ Server error:", err.message);
-  }
-});
+// Local/Railway process listens. Netlify imports `app` and must not bind a port.
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log("─────────────────────────────────────────");
+    console.log("SteelPOS Backend running");
+    console.log(`Local:   http://localhost:${PORT}`);
+    console.log(`Network: http://127.0.0.1:${PORT}`);
+    console.log("─────────────────────────────────────────");
+  });
+
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} already in use.`);
+      process.exit(1);
+    } else {
+      console.error("Server error:", err.message);
+    }
+  });
+}
