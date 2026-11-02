@@ -114,7 +114,7 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Koi bhi HTTPS origin allow karo (Vercel, Netlify, Railway frontend, etc.)
+    // Any HTTPS origin (the shop site, Vercel, Railway).
     if (/^https:\/\//.test(origin)) {
       return callback(null, true);
     }
@@ -168,7 +168,7 @@ app.use((err, req, res, next) => {
 
 module.exports = { app, connectDB };
 
-// Local/Railway process listens. Netlify imports `app` and must not bind a port.
+// Listen only when this file is started directly (Railway / local).
 if (require.main === module) {
   const PORT = process.env.PORT || 5000;
   const server = app.listen(PORT, "0.0.0.0", () => {
