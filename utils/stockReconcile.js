@@ -122,14 +122,31 @@ async function computeStockByProduct(adminId) {
   });
 
   sales.forEach((s) => {
-    if (Array.isArray(s.saleItems) && s.saleItems.length) {
-      s.saleItems.forEach((si) => {
-        addMap(sold, resolveId(si.productId || si.product, si.productName || s.productName), si.qty);
+    const saleItems = Array.isArray(s.saleItems) ? s.saleItems : [];
+    const items = Array.isArray(s.items) ? s.items : [];
+    // A line that already has its own product id must not inherit the bill's first
+    // product name. Otherwise other items on that bill get subtracted from RAD.
+    const nameFor = (ownName, lineCount) => {
+      const own = String(ownName || "").trim();
+      if (own) return own;
+      return lineCount === 1 ? s.productName : "";
+    };
+    if (saleItems.length) {
+      saleItems.forEach((si) => {
+        addMap(
+          sold,
+          resolveId(si.productId || si.product, nameFor(si.productName, saleItems.length)),
+          si.qty
+        );
       });
-    } else if (Array.isArray(s.items) && s.items.length) {
-      s.items.forEach((it) => {
+    } else if (items.length) {
+      items.forEach((it) => {
         const q = Number(it.qty) || Number(it.rows?.[0]?.qty) || 0;
-        addMap(sold, resolveId(it.productId || it.product, it.productName || s.productName), q);
+        addMap(
+          sold,
+          resolveId(it.productId || it.product, nameFor(it.productName, items.length)),
+          q
+        );
       });
     } else {
       addMap(sold, resolveId(s.product, s.productName), s.qty);
