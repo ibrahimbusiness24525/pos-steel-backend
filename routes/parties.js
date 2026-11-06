@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Party = require("../models/Party");
+const PartyBlock = require("../models/PartyBlock");
 const LedgerEntry = require("../models/LedgerEntry");
 const Purchase = require("../models/Purchase");
 const Sale = require("../models/Sale");
@@ -43,6 +44,30 @@ function partyBalance(type, opening, entries) {
   };
 }
 
+function nameKeyOf(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function blockKey(type, name) {
+  return `${type}::${nameKeyOf(name)}`;
+}
+
+async function rememberBlock(adminId, type, name) {
+  const nameKey = nameKeyOf(name);
+  if (!nameKey || (type !== "supplier" && type !== "customer")) return "";
+  await PartyBlock.updateOne(
+    { adminId, type, nameKey },
+    { $setOnInsert: { adminId, type, nameKey } },
+    { upsert: true }
+  );
+  return blockKey(type, name);
+}
+
+async function blockedKeySet(adminId) {
+  const rows = await PartyBlock.find({ adminId }).select("type nameKey").lean();
+  return new Set(rows.map((r) => `${r.type}::${r.nameKey}`));
+}
+
 function withTotals(party, entries) {
   const obj = party.toObject ? party.toObject() : party;
   return { ...obj, ...partyBalance(obj.type, obj.openingBalance, entries) };
@@ -66,9 +91,11 @@ router.get("/", async (req, res) => {
       if (!byParty[key]) byParty[key] = [];
       byParty[key].push(e);
     });
+    const blocked = [...(await blockedKeySet(req.adminId))];
     res.json({
       success: true,
       parties: parties.map((p) => withTotals(p, byParty[String(p._id)] || [])),
+      blocked,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -96,6 +123,7 @@ router.post("/", async (req, res) => {
     if (existing) {
       return res.status(400).json({ success: false, message: "This name already exists" });
     }
+    await PartyBlock.deleteOne({ adminId: req.adminId, type, nameKey: nameKeyOf(name) });
     const party = await Party.create({
       adminId: req.adminId,
       type,
@@ -115,12 +143,13 @@ router.post("/", async (req, res) => {
 // POST /api/parties/import — unique suppliers from purchases, customers from sales
 router.post("/import", async (req, res) => {
   try {
-    const [purchases, sales, existing] = await Promise.all([
+    const [purchases, sales, existing, blocked] = await Promise.all([
       Purchase.find({ adminId: req.adminId }).select("supplier supplierName"),
       Sale.find({ adminId: req.adminId }).select("customer remainingAmount isPartial"),
       Party.find({ adminId: req.adminId }),
+      blockedKeySet(req.adminId),
     ]);
-    const have = new Set(existing.map((p) => `${p.type}::${p.name.toLowerCase()}`));
+    const have = new Set(existing.map((p) => `${p.type}::${nameKeyOf(p.name)}`));
     const created = [];
 
     const supplierNames = new Set();
@@ -129,8 +158,8 @@ router.post("/import", async (req, res) => {
       if (n) supplierNames.add(n);
     });
     for (const name of supplierNames) {
-      const key = `supplier::${name.toLowerCase()}`;
-      if (have.has(key)) continue;
+      const key = `supplier::${nameKeyOf(name)}`;
+      if (have.has(key) || blocked.has(key)) continue;
       const party = await Party.create({
         adminId: req.adminId, type: "supplier", name, phone: "", partyType: "", address: "", notes: "", openingBalance: 0,
       });
@@ -144,8 +173,8 @@ router.post("/import", async (req, res) => {
       if (n) customerNames.add(n);
     });
     for (const name of customerNames) {
-      const key = `customer::${name.toLowerCase()}`;
-      if (have.has(key)) continue;
+      const key = `customer::${nameKeyOf(name)}`;
+      if (have.has(key) || blocked.has(key)) continue;
       const party = await Party.create({
         adminId: req.adminId, type: "customer", name, phone: "", partyType: "", address: "", notes: "", openingBalance: 0,
       });
@@ -198,13 +227,35 @@ router.put("/:id", async (req, res) => {
   }
 });
 
+router.post("/block", async (req, res) => {
+  try {
+    const type = req.body?.type;
+    const name = String(req.body?.name || "").trim();
+    const key = await rememberBlock(req.adminId, type, name);
+    if (!key) return res.status(400).json({ success: false, message: "Name is required" });
+    const party = await Party.findOne({
+      adminId: req.adminId,
+      type,
+      name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+    });
+    if (party) {
+      await LedgerEntry.deleteMany({ adminId: req.adminId, party: party._id });
+      await Party.deleteOne({ _id: party._id, adminId: req.adminId });
+    }
+    res.json({ success: true, blocked: [key] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // DELETE /api/parties/:id
 router.delete("/:id", async (req, res) => {
   try {
     const party = await Party.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
     if (!party) return res.status(404).json({ success: false, message: "Not found" });
+    await rememberBlock(req.adminId, party.type, party.name);
     await LedgerEntry.deleteMany({ adminId: req.adminId, party: party._id });
-    res.json({ success: true, message: "Deleted" });
+    res.json({ success: true, message: "Deleted", blocked: [blockKey(party.type, party.name)] });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
