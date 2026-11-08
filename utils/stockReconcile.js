@@ -124,33 +124,29 @@ async function computeStockByProduct(adminId) {
   sales.forEach((s) => {
     const saleItems = Array.isArray(s.saleItems) ? s.saleItems : [];
     const items = Array.isArray(s.items) ? s.items : [];
-    // A line that already has its own product id must not inherit the bill's first
-    // product name. Otherwise other items on that bill get subtracted from RAD.
+    const seen = new Set();
+    // Same rule as the stock list: one product counts once per bill (first line).
+    // A line with its own id must not inherit the bill's first product name.
     const nameFor = (ownName, lineCount) => {
       const own = String(ownName || "").trim();
       if (own) return own;
       return lineCount === 1 ? s.productName : "";
     };
-    if (saleItems.length) {
-      saleItems.forEach((si) => {
-        addMap(
-          sold,
-          resolveId(si.productId || si.product, nameFor(si.productName, saleItems.length)),
-          si.qty
-        );
-      });
-    } else if (items.length) {
-      items.forEach((it) => {
-        const q = Number(it.qty) || Number(it.rows?.[0]?.qty) || 0;
-        addMap(
-          sold,
-          resolveId(it.productId || it.product, nameFor(it.productName, items.length)),
-          q
-        );
-      });
-    } else {
-      addMap(sold, resolveId(s.product, s.productName), s.qty);
-    }
+    const take = (rawId, rawName, qty, lineCount) => {
+      const id = resolveId(rawId, nameFor(rawName, lineCount));
+      const q = Number(qty) || 0;
+      if (!id || q <= 0 || seen.has(id)) return;
+      seen.add(id);
+      addMap(sold, id, q);
+    };
+    const itemQty = (it) => {
+      if (Number(it?.qty) > 0) return Number(it.qty);
+      const row = it?.rows?.[0] || {};
+      return Number(row.qty) || Number(row.quantity) || Number(row.weight) || Number(row.feet) || 0;
+    };
+    saleItems.forEach((si) => take(si.productId || si.product, si.productName, si.qty, saleItems.length));
+    items.forEach((it) => take(it.productId || it.product, it.productName, itemQty(it), items.length));
+    if (!seen.size) take(s.product, s.productName, s.qty, 1);
   });
 
   saleReturns.forEach((r) => {
