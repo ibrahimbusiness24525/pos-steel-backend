@@ -255,6 +255,24 @@ async function computeStockByProduct(adminId) {
  * If rebuilding from old bills would change the stock that was already there,
  * keep that stock and add just this purchase. This applies to every product.
  */
+async function applyStockValueDelta(adminId, productId, qtyDelta, unitCost) {
+  const id = pid(productId);
+  const qty = Number(qtyDelta) || 0;
+  if (!adminId || !id || !qty) return;
+  const prod = await Product.findOne({ _id: id, adminId }).select("stock costValue listCost");
+  if (!prod) return;
+  const beforeStock = Number(prod.stock) || 0;
+  const beforeVal = Number(prod.costValue) || 0;
+  const rate = Number(unitCost) || Number(prod.listCost) || 0;
+  let nextVal = beforeVal;
+  if (qty > 0) nextVal = beforeVal + qty * rate;
+  else if (beforeStock > 0.0001) nextVal = beforeVal * Math.max(0, (beforeStock + qty) / beforeStock);
+  else nextVal = 0;
+  const set = { costValue: Math.round(Math.max(0, nextVal) * 100) / 100 };
+  if (rate > 0 && qty > 0) set.listCost = rate;
+  await Product.updateOne({ _id: id, adminId }, { $set: set });
+}
+
 async function keepExistingStockOnPurchase(adminId, additions, purchaseCreatedAt, stockBefore) {
   const lines = (additions || [])
     .map((a) => ({ id: pid(a.productId), qty: Number(a.qty) || 0 }))
@@ -334,6 +352,7 @@ module.exports = {
   computeStockByProduct,
   reconcileProductStock,
   keepExistingStockOnPurchase,
+  applyStockValueDelta,
   repairPurchaseProductLinks,
   resolveOwnedProduct,
   escapeRegExp,

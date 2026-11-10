@@ -4,7 +4,7 @@ const Sale = require("../models/Sale");
 const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { reconcileProductStock } = require("../utils/stockReconcile");
+const { applyStockValueDelta } = require("../utils/stockReconcile");
 
 function saleSnapshot(doc) {
   if (!doc) return {};
@@ -40,11 +40,32 @@ function saleEditSummary(before, after) {
   return bits.length ? bits.join(", ") : "updated";
 }
 
-// GET all sales for this shop in one response.
+function saleDateFilter(from, to) {
+  const start = String(from || "").slice(0, 10);
+  const end = String(to || "").slice(0, 10);
+  if (!start && !end) return null;
+  const $or = [];
+  if (start && end) {
+    $or.push({ date: { $gte: start, $lte: end } });
+    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(end + "T23:59:59.999Z") } });
+  } else if (start) {
+    $or.push({ date: start });
+    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(start + "T23:59:59.999Z") } });
+  }
+  return $or.length ? { $or } : null;
+}
+
+function saleListQuery(req) {
+  const filter = req.adminId ? { adminId: req.adminId } : {};
+  const ranged = saleDateFilter(req.query.from, req.query.to);
+  return ranged ? { ...filter, ...ranged } : filter;
+}
+
+// GET sales. Pass ?from=YYYY-MM-DD&to=YYYY-MM-DD for a day or range.
 router.get("/", protect, async (req, res) => {
   try {
-    const filter = req.adminId ? { adminId: req.adminId } : {};
-    const sales = await Sale.find(filter)
+    const sales = await Sale.find(saleListQuery(req))
+      .select("-editHistory")
       .populate("createdBy", "name email role")
       .sort({ createdAt: -1, _id: -1 })
       .lean();
@@ -113,14 +134,6 @@ router.post("/", protect, async (req, res) => {
       addRequired(data.product, data.qty);
     }
 
-    // Use the same on-hand figure as the stock list before billing is allowed to sell.
-    const neededIds = Object.keys(stockRequired);
-    if (neededIds.length) {
-      try { await reconcileProductStock(req.adminId, neededIds); } catch (err) {
-        console.warn("[SALE] stock reconcile failed:", err.message);
-      }
-    }
-
     // Stock check karo — sab products ke liye
     for (const [productId, qtyNeeded] of Object.entries(stockRequired)) {
       const prod = await Product.findOne({ _id: productId, adminId: req.adminId });
@@ -161,7 +174,9 @@ router.post("/", protect, async (req, res) => {
       );
       if (!updated) {
         console.warn(`[SALE ${sale._id}] Stock NOT deducted for product ${productId} (qty ${amount}) — product not found under this admin, or stock changed concurrently.`);
+        return;
       }
+      await applyStockValueDelta(req.adminId, productId, -amount, 0);
     };
 
     const deductedProductIds = Object.keys(stockRequired);

@@ -69,56 +69,7 @@ router.post("/reconcile-stock", protect, async (req, res) => {
 router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
-    const products = await Product.find(filter).sort({ createdAt: -1 });
-
-    // Purchases used to overwrite Hardware sale price (`price`) with cost.
-    // Restore sale from the purchase row when it was saved separately.
-    const hw = products.filter((p) => {
-      const cat = String(p.category || "").toLowerCase();
-      return cat === "hardware" || cat === "custom";
-    });
-    if (hw.length) {
-      const ids = hw.map((p) => p._id);
-      const bills = await Purchase.find({
-        adminId: req.adminId,
-        product: { $in: ids },
-      }).select("product rows unit createdAt").sort({ createdAt: -1 });
-      const saleById = {};
-      const unitById = {};
-      bills.forEach((b) => {
-        const id = String(b.product || "");
-        if (!id) return;
-        if (unitById[id] == null) {
-          const u = String(b.unit || b.rows?.[0]?.unit || "").trim().toLowerCase();
-          if (u) unitById[id] = u;
-        }
-        if (saleById[id] == null) {
-          const sp = Number(b.rows?.[0]?.salePrice) || 0;
-          if (sp > 0) saleById[id] = sp;
-        }
-      });
-      for (const p of hw) {
-        const id = String(p._id);
-        const sale = Number(p.price) || 0;
-        const patch = {};
-        if (String(p.category || "").toLowerCase() === "hardware") {
-          const sp = saleById[id];
-          if (sp > 0 && sale <= 0) {
-            p.price = sp;
-            patch.price = sp;
-          }
-        }
-        const u = unitById[id];
-        if (u && String(p.unit || "piece").toLowerCase() !== u) {
-          p.unit = u;
-          patch.unit = u;
-        }
-        if (Object.keys(patch).length) {
-          await Product.updateOne({ _id: p._id }, { $set: patch }, { runValidators: false });
-        }
-      }
-    }
-
+    const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
     res.json({ success: true, products });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -198,15 +149,19 @@ router.patch("/:id/stock-count", protect, async (req, res) => {
     }
     const rounded = Math.round(qty * 1000) / 1000;
     const now = new Date();
+    const before = await Product.findOne({ _id: req.params.id, adminId: req.adminId }).select("stock costValue listCost");
+    if (!before) return res.status(404).json({ success: false, message: "Product not found" });
+    const oldStock = Number(before.stock) || 0;
+    const oldVal = Number(before.costValue) || 0;
+    const rate = Number(before.listCost) || 0;
+    const nextVal = rounded <= 0 ? 0 : (oldStock > 0.0001 ? oldVal * (rounded / oldStock) : rounded * rate);
     const product = await Product.findOneAndUpdate(
       { _id: req.params.id, adminId: req.adminId },
-      { $set: { stock: rounded, stockBaseline: rounded, stockBaselineAt: now } },
+      { $set: { stock: rounded, stockBaseline: rounded, stockBaselineAt: now, costValue: Math.round(Math.max(0, nextVal) * 100) / 100 } },
       { new: true, runValidators: false }
     );
     if (!product) return res.status(404).json({ success: false, message: "Product not found" });
-    await reconcileProductStock(req.adminId, [String(product._id)]);
-    const fresh = await Product.findOne({ _id: product._id, adminId: req.adminId });
-    res.json({ success: true, product: fresh || product });
+    res.json({ success: true, product });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

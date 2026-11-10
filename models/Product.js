@@ -46,6 +46,8 @@ const productSchema = new mongoose.Schema(
     purchasePrice: { type: Number, default: 0 },
     purchasePercentage: { type: Number, default: 0 },
     stock: { type: Number, required: true, default: 0 },
+    listCost: { type: Number, default: 0 },
+    costValue: { type: Number, default: 0 },
     lowStockThreshold: { type: Number, default: 10 },
     barcode: { type: String, default: "" },
     brand: { type: String, default: "" },

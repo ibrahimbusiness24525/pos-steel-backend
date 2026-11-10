@@ -4,7 +4,7 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline, keepExistingStockOnPurchase } = require("../utils/stockReconcile");
+const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline, keepExistingStockOnPurchase, applyStockValueDelta } = require("../utils/stockReconcile");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -46,11 +46,27 @@ async function adjustStock(adminId, productId, delta) {
   );
 }
 
-// GET all purchases — only this admin's purchases
+function billDateFilter(from, to) {
+  const start = String(from || "").slice(0, 10);
+  const end = String(to || "").slice(0, 10);
+  if (!start && !end) return null;
+  const $or = [];
+  if (start && end) {
+    $or.push({ date: { $gte: start, $lte: end } });
+    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(end + "T23:59:59.999Z") } });
+  } else if (start) {
+    $or.push({ date: start });
+    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(start + "T23:59:59.999Z") } });
+  }
+  return $or.length ? { $or } : null;
+}
+
+// GET purchases. Pass ?from=&to= for a day or range.
 router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
-    const purchases = await Purchase.find(filter).sort({ createdAt: -1 });
+    const ranged = billDateFilter(req.query.from, req.query.to);
+    const purchases = await Purchase.find(ranged ? { ...filter, ...ranged } : filter).select("-editHistory").sort({ createdAt: -1 }).lean();
     res.json({ success: true, purchases });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -226,20 +242,19 @@ router.post("/", protect, async (req, res) => {
         }
       }
 
+      const savedCost = Number(purchase.rate) || Number(purchase.productPrice) || 0;
       await Product.findOneAndUpdate(
         { _id: purchase.product, adminId: req.adminId },
         {
           lastInvoice: purchase.invoice || purchase.invoiceNum || "",
           lastPurchaseDate: purchase.date || "",
           lastSupplier: purchase.supplier || purchase.supplierName || "",
+          ...(savedCost > 0 ? { listCost: savedCost } : {}),
         }
       );
 
-      // A new bill adds only its own quantity. Stock already on hand stays as it is.
-      if (additions.length) await keepExistingStockOnPurchase(req.adminId, additions, purchase.createdAt, stockBefore);
-      else {
-        const touch = pid(purchase.product);
-        if (touch) await reconcileProductStock(req.adminId, [touch]);
+      for (const line of additions) {
+        await applyStockValueDelta(req.adminId, line.productId, line.qty, savedCost);
       }
     } catch (stockErr) {
       // Never leave a bill that did not update this shop's stock.
@@ -326,10 +341,6 @@ router.put("/:id", protect, async (req, res) => {
       { new: true, runValidators: true }
     );
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
-
-    // Rebuild absolute stock from purchases/sales so old double-counts get corrected.
-    const touch = [...new Set([oldPid, newPid, pid(purchase.product)].filter(Boolean))];
-    if (touch.length) await reconcileProductStock(req.adminId, touch);
 
     res.json({ success: true, purchase });
   } catch (err) {
