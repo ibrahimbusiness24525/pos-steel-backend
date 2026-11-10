@@ -4,7 +4,7 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline } = require("../utils/stockReconcile");
+const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline, keepExistingStockOnPurchase } = require("../utils/stockReconcile");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -176,6 +176,25 @@ router.post("/", protect, async (req, res) => {
       }
     }
 
+    const additions = [];
+    if (!skipStock) {
+      if (Array.isArray(data.entries) && data.entries.length) {
+        data.entries.forEach((entry) => {
+          const qty = Number(entry.quantity || entry.qty) || 0;
+          if (entry.product && qty > 0) additions.push({ productId: entry.product, qty });
+        });
+      } else if (data.product && Number(data.qty) > 0) {
+        additions.push({ productId: data.product, qty: Number(data.qty) });
+      }
+    }
+
+    const priorIds = [...new Set(additions.map((a) => pid(a.productId)).filter(Boolean))];
+    const priorDocs = priorIds.length
+      ? await Product.find({ _id: { $in: priorIds }, adminId: req.adminId }).select("stock")
+      : [];
+    const stockBefore = {};
+    priorDocs.forEach((p) => { stockBefore[pid(p._id)] = Number(p.stock) || 0; });
+
     const purchase = await Purchase.create(data);
 
     try {
@@ -216,9 +235,12 @@ router.post("/", protect, async (req, res) => {
         }
       );
 
-      // Absolute rebuild so a missed $inc cannot leave stock list wrong.
-      const touch = pid(purchase.product);
-      if (touch) await reconcileProductStock(req.adminId, [touch]);
+      // A new bill adds only its own quantity. Stock already on hand stays as it is.
+      if (additions.length) await keepExistingStockOnPurchase(req.adminId, additions, purchase.createdAt, stockBefore);
+      else {
+        const touch = pid(purchase.product);
+        if (touch) await reconcileProductStock(req.adminId, [touch]);
+      }
     } catch (stockErr) {
       // Never leave a bill that did not update this shop's stock.
       await Purchase.deleteOne({ _id: purchase._id, adminId: req.adminId });

@@ -250,6 +250,48 @@ async function computeStockByProduct(adminId) {
   return result;
 }
 
+/**
+ * A new purchase may only add its own quantity.
+ * If rebuilding from old bills would change the stock that was already there,
+ * keep that stock and add just this purchase. This applies to every product.
+ */
+async function keepExistingStockOnPurchase(adminId, additions, purchaseCreatedAt, stockBefore) {
+  const lines = (additions || [])
+    .map((a) => ({ id: pid(a.productId), qty: Number(a.qty) || 0 }))
+    .filter((a) => a.id && a.qty > 0);
+  if (!adminId || !lines.length) return;
+
+  const ids = [...new Set(lines.map((a) => a.id))];
+  const added = {};
+  lines.forEach((a) => { added[a.id] = (added[a.id] || 0) + a.qty; });
+
+  const docs = await Product.find({ _id: { $in: ids }, adminId }).select("stockBaseline stockBaselineAt");
+  const before = stockBefore || {};
+  const alreadyFrozen = {};
+  docs.forEach((p) => {
+    const id = pid(p._id);
+    alreadyFrozen[id] = hasStockBaseline({ baseline: p.stockBaseline, at: p.stockBaselineAt });
+  });
+
+  await reconcileProductStock(adminId, ids);
+
+  const at = new Date(new Date(purchaseCreatedAt || Date.now()).getTime() - 1);
+  let froze = false;
+  for (const id of ids) {
+    if (alreadyFrozen[id]) continue;
+    const expected = Math.round(((before[id] || 0) + (added[id] || 0)) * 1000) / 1000;
+    const now = await Product.findOne({ _id: id, adminId }).select("stock");
+    const rebuilt = Number(now?.stock) || 0;
+    if (Math.abs(rebuilt - expected) <= 0.001) continue;
+    await Product.updateOne(
+      { _id: id, adminId },
+      { $set: { stockBaseline: before[id] || 0, stockBaselineAt: at } }
+    );
+    froze = true;
+  }
+  if (froze) await reconcileProductStock(adminId, ids);
+}
+
 async function reconcileProductStock(adminId, productIds = []) {
   // Relink orphan / foreign product ids before computing stock.
   await repairPurchaseProductLinks(adminId);
@@ -291,6 +333,7 @@ module.exports = {
   shiftStockBaseline,
   computeStockByProduct,
   reconcileProductStock,
+  keepExistingStockOnPurchase,
   repairPurchaseProductLinks,
   resolveOwnedProduct,
   escapeRegExp,
