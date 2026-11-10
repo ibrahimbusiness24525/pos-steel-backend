@@ -35,6 +35,42 @@ function addMap(map, id, qty) {
   map[key] = (map[key] || 0) + n;
 }
 
+function hasStockBaseline(meta) {
+  if (!meta || !meta.at) return false;
+  const n = Number(meta.baseline);
+  return Number.isFinite(n) && n >= 0;
+}
+
+function isAfterBaseline(doc, at) {
+  const t = new Date(doc?.createdAt || 0).getTime();
+  const b = new Date(at).getTime();
+  return Number.isFinite(t) && Number.isFinite(b) && t > b;
+}
+
+/** On-hand after a stock edit: the typed count, plus only purchases/sales saved after that edit. */
+function applyBaselineStock(baseline, purchasedAfter, purchRetAfter, soldAfter, saleRetAfter) {
+  const stock = (Number(baseline) || 0)
+    + (Number(purchasedAfter) || 0)
+    - (Number(purchRetAfter) || 0)
+    - (Number(soldAfter) || 0)
+    + (Number(saleRetAfter) || 0);
+  return Math.max(0, Math.round(stock * 1000) / 1000);
+}
+
+/** Old bills sit inside the edited count. A qty change on one of them moves that count, it does not restore the previous pieces. */
+async function shiftStockBaseline(adminId, productId, billCreatedAt, delta) {
+  const id = pid(productId);
+  const n = Number(delta) || 0;
+  if (!adminId || !id || !n) return;
+  const prod = await Product.findOne({ _id: id, adminId }).select("stockBaseline stockBaselineAt");
+  if (!hasStockBaseline({ baseline: prod?.stockBaseline, at: prod?.stockBaselineAt })) return;
+  const billTime = new Date(billCreatedAt || 0).getTime();
+  const baseTime = new Date(prod.stockBaselineAt).getTime();
+  if (!(billTime <= baseTime)) return;
+  const next = applyBaselineStock(prod.stockBaseline, n, 0, 0, 0);
+  await Product.updateOne({ _id: id, adminId }, { $set: { stockBaseline: next } });
+}
+
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -90,34 +126,65 @@ async function computeStockByProduct(adminId) {
   const purchRet = {};
   const sold = {};
   const saleRet = {};
+  const purchasedAfter = {};
+  const purchRetAfter = {};
+  const soldAfter = {};
+  const saleRetAfter = {};
 
   const [products, purchases, purchaseReturns, sales, saleReturns] = await Promise.all([
-    Product.find({ adminId }).select("_id name").lean(),
-    Purchase.find({ adminId }).select("product productName qty rows entries").lean(),
-    PurchaseReturn.find({ adminId }).select("items").lean(),
-    Sale.find({ adminId }).select("product productName qty saleItems items").lean(),
-    SaleReturn.find({ adminId }).select("items").lean(),
+    Product.find({ adminId }).select("_id name stockBaseline stockBaselineAt").lean(),
+    Purchase.find({ adminId }).select("product productName qty rows entries createdAt").lean(),
+    PurchaseReturn.find({ adminId }).select("items createdAt").lean(),
+    Sale.find({ adminId }).select("product productName qty saleItems items createdAt").lean(),
+    SaleReturn.find({ adminId }).select("items createdAt").lean(),
   ]);
 
   const resolveId = makeResolveId(products);
+  const metaById = {};
+  products.forEach((p) => {
+    const id = pid(p._id);
+    if (id) metaById[id] = { baseline: p.stockBaseline, at: p.stockBaselineAt };
+  });
+
+  // A stock edit freezes on-hand at that moment. Bills from before the edit
+  // must not be added again when a later purchase rebuilds stock.
+  const addQty = (allMap, afterMap, id, qty, doc) => {
+    const key = pid(id);
+    const n = Number(qty) || 0;
+    if (!key || !n) return;
+    const meta = metaById[key];
+    if (hasStockBaseline(meta)) {
+      if (isAfterBaseline(doc, meta.at)) addMap(afterMap, key, n);
+      return;
+    }
+    addMap(allMap, key, n);
+  };
 
   purchases.forEach((p) => {
     if (Array.isArray(p.entries) && p.entries.length) {
       p.entries.forEach((e) => {
-        addMap(
+        addQty(
           purchased,
+          purchasedAfter,
           resolveId(e.product || e.productId, e.productName || e.name || p.productName),
-          e.quantity || e.qty
+          e.quantity || e.qty,
+          p
         );
       });
     } else {
-      addMap(purchased, resolveId(p.product, p.productName), purchaseLineQty(p));
+      addQty(purchased, purchasedAfter, resolveId(p.product, p.productName), purchaseLineQty(p), p);
     }
   });
 
   purchaseReturns.forEach((r) => {
     (r.items || []).forEach((it) => {
-      addMap(purchRet, resolveId(it.product || it.productId, it.productName || it.name), it.qty);
+      addQty(
+        purchRet,
+        purchRetAfter,
+        resolveId(it.product || it.productId, it.productName || it.name),
+        it.qty,
+        r
+      );
     });
   });
 
@@ -137,7 +204,7 @@ async function computeStockByProduct(adminId) {
       const q = Number(qty) || 0;
       if (!id || q <= 0 || seen.has(id)) return;
       seen.add(id);
-      addMap(sold, id, q);
+      addQty(sold, soldAfter, id, q, s);
     };
     const itemQty = (it) => {
       if (Number(it?.qty) > 0) return Number(it.qty);
@@ -151,7 +218,13 @@ async function computeStockByProduct(adminId) {
 
   saleReturns.forEach((r) => {
     (r.items || []).forEach((it) => {
-      addMap(saleRet, resolveId(it.product || it.productId, it.productName || it.name), it.qty);
+      addQty(
+        saleRet,
+        saleRetAfter,
+        resolveId(it.product || it.productId, it.productName || it.name),
+        it.qty,
+        r
+      );
     });
   });
 
@@ -160,12 +233,19 @@ async function computeStockByProduct(adminId) {
     ...Object.keys(purchRet),
     ...Object.keys(sold),
     ...Object.keys(saleRet),
+    ...Object.keys(purchasedAfter),
+    ...Object.keys(purchRetAfter),
+    ...Object.keys(soldAfter),
+    ...Object.keys(saleRetAfter),
+    ...Object.keys(metaById).filter((id) => hasStockBaseline(metaById[id])),
   ]);
 
   const result = {};
   ids.forEach((id) => {
-    const stock = (purchased[id] || 0) - (purchRet[id] || 0) - (sold[id] || 0) + (saleRet[id] || 0);
-    result[id] = Math.max(0, Math.round(stock * 1000) / 1000);
+    const meta = metaById[id];
+    result[id] = hasStockBaseline(meta)
+      ? applyBaselineStock(meta.baseline, purchasedAfter[id], purchRetAfter[id], soldAfter[id], saleRetAfter[id])
+      : Math.max(0, Math.round(((purchased[id] || 0) - (purchRet[id] || 0) - (sold[id] || 0) + (saleRet[id] || 0)) * 1000) / 1000);
   });
   return result;
 }
@@ -207,6 +287,8 @@ async function resolveOwnedProduct(adminId, productId, productName) {
 module.exports = {
   pid,
   purchaseLineQty,
+  applyBaselineStock,
+  shiftStockBaseline,
   computeStockByProduct,
   reconcileProductStock,
   repairPurchaseProductLinks,

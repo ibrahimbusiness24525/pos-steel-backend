@@ -4,7 +4,7 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct } = require("../utils/stockReconcile");
+const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline } = require("../utils/stockReconcile");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -268,6 +268,15 @@ router.put("/:id", protect, async (req, res) => {
     const newQty = purchaseLineQty({ ...old.toObject(), ...bodyWithoutHistory });
     const productChanged = oldPid && newPid && oldPid !== newPid;
     const qtyChanged = Math.abs(oldQty - newQty) > 0.0001;
+
+    // A stock edit froze the old bills into one count. Changing one of those
+    // bills moves that count. It must not put the previous piece total back.
+    if (qtyChanged || productChanged) {
+      if (oldPid) {
+        await shiftStockBaseline(req.adminId, oldPid, old.createdAt, productChanged ? -oldQty : newQty - oldQty);
+      }
+      if (productChanged && newPid) await shiftStockBaseline(req.adminId, newPid, old.createdAt, newQty);
+    }
 
     // Date/supplier/price-only edits must NOT touch stock (was doubling stock before).
     if (productChanged || qtyChanged) {

@@ -4,6 +4,7 @@ const Sale = require("../models/Sale");
 const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
+const { reconcileProductStock } = require("../utils/stockReconcile");
 
 function saleSnapshot(doc) {
   if (!doc) return {};
@@ -110,6 +111,14 @@ router.post("/", protect, async (req, res) => {
     } else if (data.product && data.qty) {
       // Purana single-product sale (Products/Quick-sale page waghera)
       addRequired(data.product, data.qty);
+    }
+
+    // Use the same on-hand figure as the stock list before billing is allowed to sell.
+    const neededIds = Object.keys(stockRequired);
+    if (neededIds.length) {
+      try { await reconcileProductStock(req.adminId, neededIds); } catch (err) {
+        console.warn("[SALE] stock reconcile failed:", err.message);
+      }
     }
 
     // Stock check karo — sab products ke liye

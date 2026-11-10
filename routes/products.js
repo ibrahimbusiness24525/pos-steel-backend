@@ -156,6 +156,8 @@ router.put("/:id", protect, async (req, res) => {
     const filter = { _id: req.params.id, adminId: req.adminId };
     const updateData = normalizeProduct(req.body);
     delete updateData.stock;
+    delete updateData.stockBaseline;
+    delete updateData.stockBaselineAt;
     delete updateData._id;
     delete updateData.id;
     delete updateData.__v;
@@ -181,6 +183,30 @@ router.delete("/:id", protect, async (req, res) => {
     const product = await Product.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
     if (!product) return res.status(404).json({ success: false, message: "Product not found" });
     res.json({ success: true, message: "Product deleted" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Piece edit. The typed count is the stock from now on.
+// A purchase saved after this adds only its own quantity.
+router.patch("/:id/stock-count", protect, async (req, res) => {
+  try {
+    const qty = Number(req.body?.qty);
+    if (!Number.isFinite(qty) || qty < 0) {
+      return res.status(400).json({ success: false, message: "Stock must be zero or more" });
+    }
+    const rounded = Math.round(qty * 1000) / 1000;
+    const now = new Date();
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, adminId: req.adminId },
+      { $set: { stock: rounded, stockBaseline: rounded, stockBaselineAt: now } },
+      { new: true, runValidators: false }
+    );
+    if (!product) return res.status(404).json({ success: false, message: "Product not found" });
+    await reconcileProductStock(req.adminId, [String(product._id)]);
+    const fresh = await Product.findOne({ _id: product._id, adminId: req.adminId });
+    res.json({ success: true, product: fresh || product });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
