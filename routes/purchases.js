@@ -350,35 +350,49 @@ router.put("/:id", protect, async (req, res) => {
 
 router.delete("/:id", protect, async (req, res) => {
   try {
-    const purchase = await Purchase.findOne({ _id: req.params.id, adminId: req.adminId });
+    const purchase = await Purchase.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
     const allReturns = await PurchaseReturn.find({ adminId: req.adminId });
     const returns = allReturns.filter((r) =>
       (r.items || []).some((it) => String(it.purchase) === String(purchase._id))
     );
-    let returnedQty = 0;
+    const returnedByProduct = {};
     returns.forEach((r) => {
       (r.items || []).forEach((it) => {
-        if (String(it.purchase) === String(purchase._id)) returnedQty += Number(it.qty) || 0;
+        if (String(it.purchase) !== String(purchase._id)) return;
+        const id = pid(it.product || it.productId) || pid(purchase.product);
+        const q = Number(it.qty) || 0;
+        if (!id || q <= 0) return;
+        returnedByProduct[id] = (returnedByProduct[id] || 0) + q;
       });
     });
 
-    const reverse = async (productId, qty) => {
-      const net = (Number(qty) || 0) - returnedQty;
-      if (!productId || net <= 0) return;
-      await Product.findOneAndUpdate(
-        { _id: productId, adminId: req.adminId },
-        { $inc: { stock: -net } }
-      );
-    };
-
+    const lines = [];
     if (Array.isArray(purchase.entries) && purchase.entries.length) {
       for (const entry of purchase.entries) {
-        if (entry.product && entry.quantity) await reverse(entry.product, entry.quantity);
+        const id = pid(entry.product || entry.productId);
+        const q = Number(entry.quantity) || Number(entry.qty) || 0;
+        if (id && q > 0) lines.push({ id, qty: q });
       }
-    } else if (purchase.product && purchase.qty) {
-      await reverse(purchase.product, purchase.qty);
+    }
+    if (!lines.length) {
+      const id = pid(purchase.product);
+      const q = purchaseLineQty(purchase);
+      if (id && q > 0) lines.push({ id, qty: q });
+    }
+
+    for (const line of lines) {
+      const net = line.qty - (returnedByProduct[line.id] || 0);
+      if (net <= 0) continue;
+      await applyStockValueDelta(req.adminId, line.id, -net, 0);
+      await adjustStock(req.adminId, line.id, -net);
+      await Product.findOneAndUpdate(
+        { _id: line.id, adminId: req.adminId, stock: { $lt: 0 } },
+        { $set: { stock: 0 } },
+        { runValidators: false }
+      );
+      await shiftStockBaseline(req.adminId, line.id, purchase.createdAt, -net);
     }
 
     for (const r of returns) {
@@ -392,7 +406,6 @@ router.delete("/:id", protect, async (req, res) => {
       }
     }
 
-    await Purchase.deleteOne({ _id: purchase._id });
     res.json({ success: true, message: "Purchase deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
