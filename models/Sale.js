@@ -54,5 +54,6 @@ const saleSchema = new mongoose.Schema(
 );
 
 saleSchema.index({ adminId: 1, createdAt: -1, _id: -1 });
+saleSchema.index({ adminId: 1, date: -1 });
 
 module.exports = mongoose.model("Sale", saleSchema);

@@ -4,7 +4,8 @@ const Purchase = require("../models/Purchase");
 const PurchaseReturn = require("../models/PurchaseReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
-const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline, keepExistingStockOnPurchase, applyStockValueDelta } = require("../utils/stockReconcile");
+const { pid, purchaseLineQty, reconcileProductStock, resolveOwnedProduct, shiftStockBaseline, keepExistingStockOnPurchase, applyStockValueDelta, purchaseLineRemaining } = require("../utils/stockReconcile");
+const { logActivity } = require("../utils/activityLog");
 
 function purchaseSnapshot(doc) {
   if (!doc) return {};
@@ -46,19 +47,50 @@ async function adjustStock(adminId, productId, delta) {
   );
 }
 
+function snapPcs(category, qty) {
+  const n = Math.max(0, Number(qty) || 0);
+  const cat = String(category || "");
+  if (cat === "Pipe" || cat === "Hardware" || cat === "Custom") return Math.round(n);
+  return Math.round(n * 1000) / 1000;
+}
+
+/** Undo a stock-edit STK bill: put pieces back to the count from before that edit. */
+async function reverseStockEditPurchase(adminId, purchase) {
+  const id = pid(purchase.product);
+  if (!adminId || !id) return null;
+  const prod = await Product.findOne({ _id: id, adminId }).select("stock category costValue");
+  if (!prod) return null;
+  const stock = Number(prod.stock) || 0;
+  const fromQty = purchase.fromQty == null ? null : Number(purchase.fromQty);
+  const delta = Number(purchase.delta);
+  let next;
+  if (fromQty != null && Number.isFinite(fromQty)) next = fromQty;
+  else if (Number.isFinite(delta) && Math.abs(delta) > 0.0001) next = stock - delta;
+  else next = stock - (purchaseLineQty(purchase) || 0);
+  next = snapPcs(prod.category, next);
+  const nextVal = stock > 0.0001 ? (Number(prod.costValue) || 0) * (next / stock) : 0;
+  const now = new Date();
+  await Product.updateOne(
+    { _id: id, adminId },
+    {
+      $set: {
+        stock: next,
+        stockBaseline: next,
+        stockBaselineAt: now,
+        costValue: Math.round(Math.max(0, nextVal) * 100) / 100,
+      },
+    }
+  );
+  return { from: stock, to: next };
+}
+
 function billDateFilter(from, to) {
   const start = String(from || "").slice(0, 10);
   const end = String(to || "").slice(0, 10);
   if (!start && !end) return null;
-  const $or = [];
-  if (start && end) {
-    $or.push({ date: { $gte: start, $lte: end } });
-    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(end + "T23:59:59.999Z") } });
-  } else if (start) {
-    $or.push({ date: start });
-    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(start + "T23:59:59.999Z") } });
-  }
-  return $or.length ? { $or } : null;
+  const a = start || end;
+  const b = end || start;
+  return { date: { $gte: a, $lte: b } };
 }
 
 // GET purchases. Pass ?from=&to= for a day or range.
@@ -66,7 +98,13 @@ router.get("/", protect, async (req, res) => {
   try {
     const filter = req.adminId ? { adminId: req.adminId } : {};
     const ranged = billDateFilter(req.query.from, req.query.to);
-    const purchases = await Purchase.find(ranged ? { ...filter, ...ranged } : filter).select("-editHistory").sort({ createdAt: -1 }).lean();
+    const cap = Math.min(Math.max(parseInt(req.query.limit, 10) || (ranged ? 2000 : 800), 1), 2000);
+    const purchases = await Purchase.find(ranged ? { ...filter, ...ranged } : filter)
+      .select("-editHistory")
+      .sort({ createdAt: -1 })
+      .limit(cap)
+      .maxTimeMS(8000)
+      .lean();
     res.json({ success: true, purchases });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -266,6 +304,17 @@ router.post("/", protect, async (req, res) => {
       throw stockErr;
     }
 
+    await logActivity(req, {
+      type: "purchase",
+      date: purchase.date,
+      product: purchase.product,
+      productName: purchase.productName,
+      category: purchase.category,
+      qty: purchaseLineQty(purchase),
+      invoice: purchase.invoice || purchase.invoiceNum,
+      party: purchase.supplier || purchase.supplierName,
+      summary: "Purchase saved",
+    });
     res.status(201).json({ success: true, purchase });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -342,6 +391,17 @@ router.put("/:id", protect, async (req, res) => {
     );
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
+    await logActivity(req, {
+      type: "purchase-edit",
+      date: purchase.date,
+      product: purchase.product,
+      productName: purchase.productName,
+      category: purchase.category,
+      qty: purchaseLineQty(purchase),
+      invoice: purchase.invoice || purchase.invoiceNum,
+      party: purchase.supplier || purchase.supplierName,
+      summary: "Purchase edited",
+    });
     res.json({ success: true, purchase });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -350,9 +410,10 @@ router.put("/:id", protect, async (req, res) => {
 
 router.delete("/:id", protect, async (req, res) => {
   try {
-    const purchase = await Purchase.findOneAndDelete({ _id: req.params.id, adminId: req.adminId });
+    const purchase = await Purchase.findOne({ _id: req.params.id, adminId: req.adminId });
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
 
+    const skipStockAdj = !!(purchase.skipStock || purchase.stockEdit);
     const allReturns = await PurchaseReturn.find({ adminId: req.adminId });
     const returns = allReturns.filter((r) =>
       (r.items || []).some((it) => String(it.purchase) === String(purchase._id))
@@ -373,26 +434,52 @@ router.delete("/:id", protect, async (req, res) => {
       for (const entry of purchase.entries) {
         const id = pid(entry.product || entry.productId);
         const q = Number(entry.quantity) || Number(entry.qty) || 0;
-        if (id && q > 0) lines.push({ id, qty: q });
+        if (id && q > 0) lines.push({ id, qty: q, name: entry.productName || purchase.productName || "" });
       }
     }
     if (!lines.length) {
       const id = pid(purchase.product);
       const q = purchaseLineQty(purchase);
-      if (id && q > 0) lines.push({ id, qty: q });
+      if (id && q > 0) lines.push({ id, qty: q, name: purchase.productName || "" });
     }
 
-    for (const line of lines) {
-      const net = line.qty - (returnedByProduct[line.id] || 0);
-      if (net <= 0) continue;
-      await applyStockValueDelta(req.adminId, line.id, -net, 0);
-      await adjustStock(req.adminId, line.id, -net);
-      await Product.findOneAndUpdate(
-        { _id: line.id, adminId: req.adminId, stock: { $lt: 0 } },
-        { $set: { stock: 0 } },
-        { runValidators: false }
-      );
-      await shiftStockBaseline(req.adminId, line.id, purchase.createdAt, -net);
+    if (!skipStockAdj) {
+      for (const line of lines) {
+        const net = line.qty - (returnedByProduct[line.id] || 0);
+        if (net <= 0) continue;
+        const remaining = await purchaseLineRemaining(req.adminId, purchase, line.id, net);
+        if (remaining + 0.08 < net) {
+          const used = Math.round((net - remaining) * 1000) / 1000;
+          return res.status(400).json({
+            success: false,
+            purchased: net,
+            remaining,
+            used,
+            message: `"${line.name || "Product"}": is bill ki ${net} pieces mein se ${used} sale/use ho chuke hain. Ab ${remaining} pieces stock mein hain. Poori bill delete nahi ho sakti. Remaining ${remaining} kam karne ke liye Stock List → Edit use karein, ya pehle sale return karein.`,
+          });
+        }
+      }
+    }
+
+    const removed = await Purchase.findOneAndDelete({ _id: purchase._id, adminId: req.adminId });
+    if (!removed) return res.status(404).json({ success: false, message: "Purchase not found" });
+
+    let undone = null;
+    if (skipStockAdj) {
+      undone = await reverseStockEditPurchase(req.adminId, purchase);
+    } else {
+      for (const line of lines) {
+        const net = line.qty - (returnedByProduct[line.id] || 0);
+        if (net <= 0) continue;
+        await applyStockValueDelta(req.adminId, line.id, -net, 0);
+        await adjustStock(req.adminId, line.id, -net);
+        await Product.findOneAndUpdate(
+          { _id: line.id, adminId: req.adminId, stock: { $lt: 0 } },
+          { $set: { stock: 0 } },
+          { runValidators: false }
+        );
+        await shiftStockBaseline(req.adminId, line.id, purchase.createdAt, -net);
+      }
     }
 
     for (const r of returns) {
@@ -406,6 +493,21 @@ router.delete("/:id", protect, async (req, res) => {
       }
     }
 
+    await logActivity(req, {
+      type: "purchase-delete",
+      date: purchase.date,
+      product: purchase.product,
+      productName: purchase.productName,
+      category: purchase.category,
+      qty: purchaseLineQty(purchase),
+      fromQty: undone ? undone.from : purchase.fromQty,
+      toQty: undone ? undone.to : purchase.toQty,
+      invoice: purchase.invoice || purchase.invoiceNum,
+      party: purchase.supplier || purchase.supplierName,
+      summary: undone
+        ? `Stock edit deleted ${undone.from} → ${undone.to}`
+        : "Purchase deleted",
+    });
     res.json({ success: true, message: "Purchase deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

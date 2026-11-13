@@ -344,6 +344,55 @@ async function resolveOwnedProduct(adminId, productId, productName) {
   }).select("_id name category unit");
 }
 
+/** How many pieces of this purchase line are still in stock (FIFO). */
+async function purchaseLineRemaining(adminId, purchase, productId, lineQty) {
+  const id = pid(productId);
+  const bought = Number(lineQty) || 0;
+  if (!adminId || !id || bought <= 0) return 0;
+  const [purchases, sales] = await Promise.all([
+    Purchase.find({ adminId }).select("product productName qty rows entries createdAt _id").sort({ createdAt: 1, _id: 1 }).lean(),
+    Sale.find({ adminId }).select("product productName qty saleItems items createdAt").lean(),
+  ]);
+  let sold = 0;
+  sales.forEach((s) => {
+    const saleItems = Array.isArray(s.saleItems) ? s.saleItems : [];
+    const items = Array.isArray(s.items) ? s.items : [];
+    const seen = new Set();
+    const take = (rawId, qty) => {
+      const sid = pid(rawId);
+      const q = Number(qty) || 0;
+      if (sid !== id || q <= 0 || seen.has(sid)) return;
+      seen.add(sid);
+      sold += q;
+    };
+    saleItems.forEach((si) => take(si.productId || si.product, si.qty));
+    items.forEach((it) => {
+      const row = it?.rows?.[0] || {};
+      take(it.productId || it.product, Number(it.qty) || Number(row.qty) || Number(row.quantity) || Number(row.weight) || Number(row.feet) || 0);
+    });
+    if (!seen.size) take(s.product, s.qty);
+  });
+  let consume = sold;
+  for (const p of purchases) {
+    if (p.stockEdit || String(p.notes || "").toLowerCase().includes("stock edit")) continue;
+    const lines = [];
+    if (Array.isArray(p.entries) && p.entries.length) {
+      p.entries.forEach((e) => {
+        if (pid(e.product || e.productId) === id) lines.push(Number(e.quantity) || Number(e.qty) || 0);
+      });
+    } else if (pid(p.product) === id) {
+      lines.push(purchaseLineQty(p));
+    }
+    for (const q of lines) {
+      if (q <= 0) continue;
+      const rem = Math.max(0, q - Math.min(q, consume));
+      consume = Math.max(0, consume - q);
+      if (String(p._id) === String(purchase._id)) return Math.round(rem * 1000) / 1000;
+    }
+  }
+  return bought;
+}
+
 module.exports = {
   pid,
   purchaseLineQty,
@@ -355,5 +404,6 @@ module.exports = {
   applyStockValueDelta,
   repairPurchaseProductLinks,
   resolveOwnedProduct,
+  purchaseLineRemaining,
   escapeRegExp,
 };

@@ -5,6 +5,7 @@ const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
 const { protect } = require("../middleware/auth");
 const { applyStockValueDelta } = require("../utils/stockReconcile");
+const { logActivity } = require("../utils/activityLog");
 
 function saleSnapshot(doc) {
   if (!doc) return {};
@@ -44,15 +45,9 @@ function saleDateFilter(from, to) {
   const start = String(from || "").slice(0, 10);
   const end = String(to || "").slice(0, 10);
   if (!start && !end) return null;
-  const $or = [];
-  if (start && end) {
-    $or.push({ date: { $gte: start, $lte: end } });
-    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(end + "T23:59:59.999Z") } });
-  } else if (start) {
-    $or.push({ date: start });
-    $or.push({ date: { $in: ["", null] }, createdAt: { $gte: new Date(start + "T00:00:00.000Z"), $lte: new Date(start + "T23:59:59.999Z") } });
-  }
-  return $or.length ? { $or } : null;
+  const a = start || end;
+  const b = end || start;
+  return { date: { $gte: a, $lte: b } };
 }
 
 function saleListQuery(req) {
@@ -61,15 +56,43 @@ function saleListQuery(req) {
   return ranged ? { ...filter, ...ranged } : filter;
 }
 
+const SALE_LIST_SELECT = [
+  "invoice", "invoiceNum", "date", "customer", "productName", "product",
+  "qty", "rate", "total", "grandTotal", "category",
+  "paymentMethod", "bankName", "accountId", "accountName",
+  "settlement", "isPartial", "paidAmount", "remainingAmount",
+  "loaderName", "loaderFee", "bindingFee",
+  "discount", "discountType", "discountPct", "cashReceived", "changeDue",
+  "createdAt",
+  "items.productName", "items.productId", "items.product", "items.qty", "items.subtotal", "items.category",
+  "saleItems.productId", "saleItems.product", "saleItems.qty",
+].join(" ");
+
 // GET sales. Pass ?from=YYYY-MM-DD&to=YYYY-MM-DD for a day or range.
 router.get("/", protect, async (req, res) => {
   try {
+    const ranged = !!(req.query.from || req.query.to);
+    const cap = Math.min(Math.max(parseInt(req.query.limit, 10) || (ranged ? 2000 : 800), 1), 2000);
     const sales = await Sale.find(saleListQuery(req))
-      .select("-editHistory")
-      .populate("createdBy", "name email role")
+      .select(SALE_LIST_SELECT)
       .sort({ createdAt: -1, _id: -1 })
+      .limit(cap)
+      .maxTimeMS(8000)
       .lean();
     res.json({ success: true, sales });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get("/:id", protect, async (req, res) => {
+  try {
+    if (!/^[a-fA-F0-9]{24}$/.test(String(req.params.id))) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+    const sale = await Sale.findOne({ _id: req.params.id, adminId: req.adminId }).lean();
+    if (!sale) return res.status(404).json({ success: false, message: "Sale not found" });
+    res.json({ success: true, sale });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -189,6 +212,17 @@ router.post("/", protect, async (req, res) => {
       await deductStock(data.product, data.qty);
     }
 
+    await logActivity(req, {
+      type: "sale",
+      date: sale.date,
+      product: sale.product,
+      productName: sale.productName,
+      category: sale.category,
+      qty: Number(sale.qty) || 0,
+      invoice: sale.invoice || sale.invoiceNum,
+      party: sale.customer,
+      summary: "Sale saved",
+    });
     res.status(201).json({ success: true, sale });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -265,6 +299,17 @@ router.put("/:id", protect, async (req, res) => {
       await deductStock(sale.product, sale.qty);
     }
 
+    await logActivity(req, {
+      type: "sale-edit",
+      date: sale.date,
+      product: sale.product,
+      productName: sale.productName,
+      category: sale.category,
+      qty: Number(sale.qty) || 0,
+      invoice: sale.invoice || sale.invoiceNum,
+      party: sale.customer,
+      summary: "Sale edited",
+    });
     res.json({ success: true, sale });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -305,7 +350,17 @@ router.delete("/:id", protect, async (req, res) => {
 
     await SaleReturn.deleteMany({ adminId: req.adminId, sale: sale._id });
     await Sale.deleteOne({ _id: sale._id });
-
+    await logActivity(req, {
+      type: "sale-delete",
+      date: sale.date,
+      product: sale.product,
+      productName: sale.productName,
+      category: sale.category,
+      qty: Number(sale.qty) || 0,
+      invoice: sale.invoice || sale.invoiceNum,
+      party: sale.customer,
+      summary: "Sale deleted",
+    });
     res.json({ success: true, message: "Sale deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

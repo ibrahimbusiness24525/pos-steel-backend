@@ -46,5 +46,6 @@ const purchaseSchema = new mongoose.Schema(
 
 purchaseSchema.index({ adminId: 1, createdAt: -1 });
 purchaseSchema.index({ adminId: 1, product: 1, createdAt: -1 });
+purchaseSchema.index({ adminId: 1, date: -1 });
 
 module.exports = mongoose.model("Purchase", purchaseSchema);
